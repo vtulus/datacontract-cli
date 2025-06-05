@@ -63,6 +63,9 @@
       {% if field.required %}
       <span class="inline-flex items-center rounded-md bg-gray-50 px-1 py-1 text-xs font-medium text-gray-600 ring-1 ring-inset ring-gray-500/10 mr-1 mt-1">required</span>
       {% endif %}
+      {% if field.config.requiredTfS %} <!--custom if-block-->
+      <span class="inline-flex items-center rounded-md bg-gray-50 px-1 py-1 text-xs font-medium text-gray-600 ring-1 ring-inset ring-gray-500/10 mr-1 mt-1">required for TfS compliance</span>
+      {% endif %}
       {% if field.unique %}
       <span class="inline-flex items-center rounded-md bg-gray-50 px-1 py-1 text-xs font-medium text-gray-600 ring-1 ring-inset ring-gray-500/10 mr-1 mt-1">unique</span>
       {% endif %}
@@ -115,6 +118,16 @@
     {% for quality in field.quality %}
     {{ render_partial('partials/quality.html', quality = quality) }}
     {% endfor %}
+    {% endif %}
+    {% if field.config.fieldResponsible %} <!--custom if-block-->
+    <div class="mt-2">
+      <span class="italic">Field responsible:</span> <strong>{{ field.config.fieldResponsible }}</strong>
+    </div>
+    {% endif %}
+    {% if field.config.notes %} <!--custom if-block-->
+    <div class="mt-2 bg-yellow-50 p-2 rounded-md border border-yellow-200">
+      <span class="text-yellow-700">{{ field.config.notes }}</span>
+    </div>
     {% endif %}
   </td>
 </tr>
