@@ -8,6 +8,7 @@ import yaml
 from jinja2 import Environment, PackageLoader, select_autoescape
 
 from datacontract.export.exporter import Exporter
+from datacontract.export.odcs_v3_exporter import to_odcs_v3_yaml
 from datacontract.model.data_contract_specification import DataContractSpecification
 
 
@@ -49,7 +50,11 @@ def to_html(data_contract_spec: DataContractSpecification) -> str:
 
     style_content, _, _ = package_loader.get_source(env, "style/output.css")
 
-    datacontract_yaml = data_contract_spec.to_yaml()
+    try:
+        datacontract_yaml = to_odcs_v3_yaml(data_contract_spec)
+    except Exception as e:
+        logging.warning(f"Failed to convert to OpenDataContractStandard: {e}")
+        datacontract_yaml = data_contract_spec.to_yaml()
 
     tz = pytz.timezone("UTC")
     now = datetime.datetime.now(tz)
