@@ -1,5 +1,26 @@
 <div class="mt-2">
   <span class="italic">Quality | {{quality.type|upper}}:</span> {{ quality.description }}
+
+  {% if quality.type == 'library' and quality.rule == 'validValues' %} <!--custom if-block-->
+  <div class="pl-4">
+    Valid Values:
+    <div class="ring-1 ring-inset ring-gray-500/10 bg-gray-50 p-2 rounded-md">
+      {% for prop in quality.customProperties %}
+        {% if prop.property == 'validValues' and prop.value %}
+          <ul class="list-disc pl-8 my-1">
+            {% for val in prop.value %}
+              <li class="font-mono">{{ val }}</li>
+            {% endfor %}
+          </ul>
+        {% endif %}
+      {% endfor %}
+      {% if not quality.customProperties|selectattr('property', 'equalto', 'validValues')|first %}
+        <p class="text-gray-500 italic">Valid values are not specified...</p>
+      {% endif %}
+    </div>
+  </div>
+  {% endif %}
+
   {% if quality.type == 'sql' and quality.query %}
   <div class="pl-4">
     Query:
