@@ -13,7 +13,7 @@ from datacontract.model.data_contract_specification import DataContractSpecifica
 
 
 class HtmlExporter(Exporter):
-    def export(self, data_contract, model, server, sql_server_type, export_args) -> dict:
+    def export(self, data_contract, model, server, sql_server_type, export_args) -> str:
         return to_html(data_contract)
 
 
