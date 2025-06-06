@@ -208,4 +208,11 @@
   {% endfor %}
   {% endif %}
 
+  {% if server.customProperties %}
+  <div class="mt-2 pt-2 border-t border-gray-200">
+    <div class="text-sm font-medium text-gray-700 mb-1">Custom Properties:</div>
+    {{ render_partial('partials/custom_properties.html', properties=server.customProperties, display_mode="compact") }}
+  </div>
+  {% endif %}
+
 </li>

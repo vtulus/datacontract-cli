@@ -141,6 +141,15 @@
                   <dd class="mt-1 text-sm text-gray-700">{{ datacontract.description.limitations }}</dd>
                 </div>
                 {% endif %}
+
+                {% if datacontract.description.customProperties %}
+                <div>
+                  <dt class="text-sm font-medium text-gray-900">Custom Properties</dt>
+                  <dd class="mt-1">
+                    {{ render_partial('partials/custom_properties.html', properties=datacontract.description.customProperties, display_mode="compact") }}
+                  </dd>
+                </div>
+                {% endif %}
                 {% endif %}
 
                 {% if datacontract.contractCreatedTs %}
@@ -324,6 +333,63 @@
                           <td class="px-4 py-4 text-sm text-gray-500">{{ property.description or "-"
                             }}
                           </td>
+                          {% if property.customProperties %}
+                          <tr class="bg-gray-50 border-t border-gray-200">
+                            <td colspan="5" class="px-6 py-0">
+                              <details class="group">
+                                <summary class="list-none cursor-pointer py-1.5 flex items-center text-sm text-gray-500 hover:text-gray-700">
+                                  <svg class="w-4 h-4 mr-1 text-gray-400 group-open:rotate-90 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 5l7 7-7 7"></path>
+                                  </svg>
+                                  <span class="font-medium">Custom Fields</span>
+                                </summary>
+                                <div class="pb-4 rounded-md">
+                                {{ render_partial('partials/custom_properties.html', properties=property.customProperties, display_mode="detailed") }}
+                                </div>
+                              </details>
+                            </td>
+                          </tr>
+                          {% endif %}
+                          {% if property.quality %}
+                          <tr class="bg-gray-50 border-t border-gray-200">
+                            <td colspan="5" class="px-6 py-0">
+                              <details class="group">
+                                <summary class="list-none cursor-pointer py-1.5 flex items-center text-sm text-gray-500 hover:text-gray-700">
+                                  <svg class="w-4 h-4 mr-1 text-gray-400 group-open:rotate-90 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 5l7 7-7 7"></path>
+                                  </svg>
+                                  <span class="font-medium">Quality Rules</span>
+                                </summary>
+                                <div class="px-4 py-3">
+                                  <div class="space-y-6">
+                                    {% for q in property.quality %}
+                                      <div class="p-2 bg-yellow-50 rounded-md shadow-sm">
+                                        <div class="font-medium text-sm">
+                                          {% if q.type %}
+                                            {{ q.type }}{% if q.rule %} <span class="text-xs text-gray-600">({{ q.rule }})</span>{% endif %}
+                                          {% else %}
+                                            {{ q.rule }}
+                                          {% endif %}
+                                        </div>
+                                        <div class="text-xs text-gray-600 mt-1">{{ q.description or "" }}</div>
+                                        {% if q.dimension %}
+                                          <span class="inline-flex items-center rounded-md bg-purple-50 px-1.5 py-0.5 text-xs font-normal text-purple-700 ring-1 ring-inset ring-purple-600/20 mt-1.5">{{ q.dimension }}</span>
+                                        {% endif %}
+                                        
+                                        {% if q.customProperties %}
+                                        <div class="mt-2 pt-1 border-t border-gray-200">
+                                          <div class="text-xs text-gray-500 mb-1">Custom Properties:</div>
+                                          {{ render_partial('partials/custom_properties.html', properties=q.customProperties, display_mode="compact") }}
+                                        </div>
+                                        {% endif %}
+                                      </div>
+                                    {% endfor %}
+                                  </div>    
+                                </div>
+                              </details>
+                            </td>
+                          </tr>
+                          {% endif %}                          
                         </tr>
                         {% endfor %}
                         </tbody>
@@ -341,6 +407,12 @@
                                 class="inline-flex items-center rounded-md bg-purple-50 px-2 py-1 text-xs font-medium text-purple-800 ring-1 ring-inset ring-purple-600/20 w-fit">{{ quality.dimension }}</span>
                               {% endif %}
                             </div>
+                            {% if quality.customProperties %}
+                            <div class="mt-2 pt-2 border-t border-gray-200">
+                              <div class="text-xs font-medium text-gray-700 mb-1">Custom Properties:</div>
+                              {{ render_partial('partials/custom_properties.html', properties=quality.customProperties, display_mode="compact") }}
+                            </div>
+                            {% endif %}                              
                           </th>
                         </tr>
                         {% endfor %}
@@ -525,6 +597,14 @@
                     role.secondLevelApprovers or "-" }}
                   </td>
                 </tr>
+				        {% if role.customProperties %}
+                <tr class="bg-gray-50">
+                  <td colspan="4" class="px-6 py-2">
+                    <div class="text-xs font-medium text-gray-700 mb-1">Custom Properties:</div>
+                    {{ render_partial('partials/custom_properties.html', properties=role.customProperties, display_mode="compact") }}
+                  </td>
+                </tr>
+                {% endif %}	                
                 {% endfor %}
                 </tbody>
               </table>
@@ -596,26 +676,7 @@
 
             <div class="mt-2 overflow-hidden bg-white shadow-sm ring-1 ring-gray-900/5 sm:rounded-lg">
               <table class="min-w-full divide-y divide-gray-300">
-                <thead class="bg-gray-50">
-                  <tr>
-                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Property</th>
-                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Value</th>
-                  </tr>
-                </thead>
-                <tbody class="divide-y divide-gray-200 bg-white">
-                  {% for prop in datacontract.customProperties %}
-                  <tr>
-                    <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{{ prop.property }}</td>
-                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                      {% if prop.value is iterable and prop.value is not string %}
-                        {% for item in prop.value %}{{ item }}{% if not loop.last %}, {% endif %}{% endfor %}
-                      {% else %}
-                        {{ prop.value }}
-                      {% endif %}
-                    </td>
-                  </tr>
-                  {% endfor %}
-                </tbody>
+                {{ render_partial('partials/custom_properties.html', properties=datacontract.customProperties, display_mode="detailed", context="custom-properties-section") }}
               </table>
             </div>
           </section>
