@@ -924,8 +924,6 @@ If using Databricks, and an error is thrown when trying to deploy the SQL DDLs w
 
 ```shell
 spark.conf.set(“spark.databricks.delta.schema.typeCheck.enabled”, “false”)
-from datacontract.model import data_contract_specification
-data_contract_specification.DATACONTRACT_TYPES.append(“variant”)
 ```
 
 #### Great Expectations
@@ -1192,9 +1190,9 @@ FROM
                                                                                                     
 ╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
 │ *  --format                       [sql|avro|dbt|dbml|glue|jsonsc  The format of the source file. │
-│                                   hema|bigquery|odcs|unity|spark  [default: None]                │
-│                                   |iceberg|parquet|csv|protobuf|  [required]                     │
-│                                   excel]                                                         │
+│                                   hema|json|bigquery|odcs|unity|  [default: None]                │
+│                                   spark|iceberg|parquet|csv|prot  [required]                     │
+│                                   obuf|excel]                                                    │
 │    --output                       PATH                            Specify the file path where    │
 │                                                                   the Data Contract will be      │
 │                                                                   saved. If no path is provided, │
@@ -1618,6 +1616,8 @@ datacontract catalog --files "*.odcs.yaml"
  information.                                                                                       
  To connect to servers (such as a Snowflake data source), set the credentials as environment        
  variables as documented in https://cli.datacontract.com/#test                                      
+ It is possible to run the API with extra arguments for `uvicorn.run()` as keyword arguments, e.g.: 
+ `datacontract api --port 1234 --root_path /datacontract`.                                          
                                                                                                     
 ╭─ Options ────────────────────────────────────────────────────────────────────────────────────────╮
 │ --port        INTEGER  Bind socket to this port. [default: 4242]                                 │
@@ -1884,7 +1884,7 @@ if __name__ == "__main__":
 Output
 
 ```yaml
-dataContractSpecification: 1.1.0
+dataContractSpecification: 1.2.0
 id: uuid-custom
 info:
   title: my_custom_imported_data
@@ -1903,22 +1903,9 @@ models:
 ```
 ## Development Setup
 
-Python base interpreter should be 3.11.x (unless working on 3.12 release candidate).
-
-```bash
-# create venv
-python3.11 -m venv venv
-source venv/bin/activate
-
-# Install Requirements
-pip install --upgrade pip setuptools wheel
-pip install -e '.[dev]'
-pre-commit install
-pre-commit run --all-files
-pytest
-```
-
-### Use uv (recommended)
+- Install [uv](https://docs.astral.sh/uv/)
+- Python base interpreter should be 3.11.x .
+- Docker engine must be running to execute the tests.
 
 ```bash
 # make sure uv is installed
