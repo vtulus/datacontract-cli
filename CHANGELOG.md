@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+## [0.10.33] - 2025-07-29
+
+### Added
+- Export to Excel: Convert ODCS YAML to Excel https://github.com/datacontract/open-data-contract-standard-excel-template (#742)
+
 
 ## [0.10.32] - 2025-07-28
 
@@ -42,19 +47,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - `pytest tests\test_api.py`: Fixed an issue where special characters were not read correctly from file.
-
-## [0.10.28] - 2025-06-05
-
-### Added
-- Much better ODCS support
-    - Import anything to ODCS via the `import --spec odcs` flag
-    - Export to HTML with an ODCS native template via `export --format html`
-    - Export to Mermaid with an ODCS native mapping via `export --format mermaid`
-- The databricks `unity` importer now supports more than a single table. You can use `--unity-table-full-name` multiple times to import multiple tables. And it will automatically add a server with the catalog and schema name.
-
-### Changed
-
-### Fixed
 
 ## [0.10.28] - 2025-06-05
 
