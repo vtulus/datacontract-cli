@@ -3,6 +3,33 @@ from datacontract.breaking.breaking_rules import BreakingRules
 from datacontract.model.data_contract_specification import Contact, DeprecatedQuality, Field, Info, Model, Terms
 
 
+def safe_get_fields(old_obj, new_obj):
+    """Safely get all fields from two objects, handling None cases."""
+    fields = {}
+
+    # Handle new_obj attributes
+    if new_obj is not None:
+        if hasattr(new_obj, "model_dump"):
+            fields.update(new_obj.model_dump())
+        elif hasattr(new_obj, "dict"):
+            fields.update(new_obj.dict())
+
+        if hasattr(new_obj, "model_extra") and new_obj.model_extra:
+            fields.update(new_obj.model_extra)
+
+    # Handle old_obj attributes
+    if old_obj is not None:
+        if hasattr(old_obj, "model_dump"):
+            fields.update({k: v for k, v in old_obj.model_dump().items() if k not in fields})
+        elif hasattr(old_obj, "dict"):
+            fields.update({k: v for k, v in old_obj.dict().items() if k not in fields})
+
+        if hasattr(old_obj, "model_extra") and old_obj.model_extra:
+            fields.update({k: v for k, v in old_obj.model_extra.items() if k not in fields})
+
+    return fields
+
+
 def info_breaking_changes(
     old_info: Info,
     new_info: Info,
@@ -14,7 +41,8 @@ def info_breaking_changes(
     composition = ["info"]
 
     if old_info and new_info:
-        info_definition_fields = vars(new_info) | new_info.model_extra | old_info.model_extra
+        # info_definition_fields = vars(new_info) | new_info.model_extra | old_info.model_extra
+        info_definition_fields = safe_get_fields(old_info, new_info)
 
         for info_definition_field in info_definition_fields.keys():
             if info_definition_field == "contact":
@@ -103,7 +131,8 @@ def contact_breaking_changes(
             )
 
     elif old_contact and new_contact:
-        contact_definition_fields = vars(new_contact) | new_contact.model_extra | old_contact.model_extra
+        # contact_definition_fields = vars(new_contact) | new_contact.model_extra | old_contact.model_extra
+        contact_definition_fields = safe_get_fields(old_contact, new_contact)
 
         for contact_definition_field in contact_definition_fields.keys():
             old_value = getattr(old_contact, contact_definition_field, None)
@@ -179,7 +208,8 @@ def terms_breaking_changes(
             )
 
     if old_terms and new_terms:
-        terms_definition_fields = vars(new_terms) | new_terms.model_extra | old_terms.model_extra
+        # terms_definition_fields = vars(new_terms) | new_terms.model_extra | old_terms.model_extra
+        terms_definition_fields = safe_get_fields(old_terms, new_terms)
 
         for terms_definition_field in terms_definition_fields.keys():
             old_value = getattr(old_terms, terms_definition_field, None)
@@ -341,7 +371,8 @@ def model_breaking_changes(
 ) -> list[BreakingChange]:
     results = list[BreakingChange]()
 
-    model_definition_fields = vars(new_model) | new_model.model_extra | old_model.model_extra
+    # model_definition_fields = vars(new_model) | new_model.model_extra | old_model.model_extra
+    model_definition_fields = safe_get_fields(old_model, new_model)
 
     for model_definition_field in model_definition_fields.keys():
         if model_definition_field == "fields":
@@ -449,7 +480,8 @@ def field_breaking_changes(
 ) -> list[BreakingChange]:
     results = list[BreakingChange]()
 
-    field_definition_fields = vars(new_field) | new_field.model_extra | old_field.model_extra
+    # field_definition_fields = vars(new_field) | new_field.model_extra | old_field.model_extra
+    field_definition_fields = safe_get_fields(old_field, new_field)
     for field_definition_field in field_definition_fields.keys():
         if field_definition_field == "ref_obj":
             continue
