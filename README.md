@@ -161,6 +161,14 @@ if not run.has_passed():
 
 Choose the most appropriate installation method for your needs:
 
+### uv
+
+If you have [uv](https://docs.astral.sh/uv/) installed, you can run datacontract-cli directly without installing:
+
+```
+uv run --with 'datacontract-cli[all]' datacontract --version
+```
+
 ### pip
 Python 3.10, 3.11, and 3.12 are supported. We recommend to use Python 3.11.
 
@@ -222,6 +230,7 @@ A list of available extras:
 
 | Dependency              | Installation Command                       |
 |-------------------------|--------------------------------------------|
+| Amazon Athena           | `pip install datacontract-cli[athena]`     |
 | Avro Support            | `pip install datacontract-cli[avro]`       |
 | Google BigQuery         | `pip install datacontract-cli[bigquery]`   |
 | Databricks Integration  | `pip install datacontract-cli[databricks]` |
@@ -366,6 +375,7 @@ Credentials are provided with environment variables.
 Supported server types:
 
 - [s3](#S3)
+- [athena](#athena)
 - [bigquery](#bigquery)
 - [azure](#azure)
 - [sqlserver](#sqlserver)
@@ -376,6 +386,7 @@ Supported server types:
 - [kafka](#kafka)
 - [postgres](#postgres)
 - [trino](#trino)
+- [api](#api)
 - [local](#local)
 
 Supported formats:
@@ -434,6 +445,41 @@ servers:
 | `DATACONTRACT_S3_SECRET_ACCESS_KEY` | `93S7LRrJcqLaaaa/XXXXXXXXXXXXX` | AWS Secret Access Key                  |
 | `DATACONTRACT_S3_SESSION_TOKEN`     | `AQoDYXdzEJr...`                | AWS temporary session token (optional) |
 
+
+#### Athena
+
+Data Contract CLI can test data in AWS Athena stored in S3.
+Supports different file formats, such as Iceberg, Parquet, JSON, CSV...
+
+##### Example
+
+datacontract.yaml
+```yaml
+servers:
+  athena:
+    type: athena
+    catalog: awsdatacatalog # awsdatacatalog is the default setting
+    schema: icebergdemodb   # in Athena, this is called "database"
+    regionName: eu-central-1
+    stagingDir: s3://my-bucket/athena-results/
+models:
+  my_table: # corresponds to a table of view name
+    type: table
+    fields:
+      my_column_1: # corresponds to a column
+        type: string
+        config:
+          physicalType: varchar
+```
+
+##### Environment Variables
+
+| Environment Variable                | Example                         | Description                            |
+|-------------------------------------|---------------------------------|----------------------------------------|
+| `DATACONTRACT_S3_REGION`            | `eu-central-1`                  | Region of Athena service               |
+| `DATACONTRACT_S3_ACCESS_KEY_ID`     | `AKIAXV5Q5QABCDEFGH`            | AWS Access Key ID                      |
+| `DATACONTRACT_S3_SECRET_ACCESS_KEY` | `93S7LRrJcqLaaaa/XXXXXXXXXXXXX` | AWS Secret Access Key                  |
+| `DATACONTRACT_S3_SESSION_TOKEN`     | `AQoDYXdzEJr...`                | AWS temporary session token (optional) |
 
 
 #### Google Cloud Storage (GCS)
@@ -802,6 +848,38 @@ models:
 | `DATACONTRACT_TRINO_PASSWORD` | `mysecretpassword` | Password    |
 
 
+#### API
+
+Data Contract CLI can test APIs that return data in JSON format. 
+Currently, only GET requests are supported.
+
+##### Example
+
+datacontract.yaml
+```yaml
+servers:
+  api:
+    type: "api"
+    location: "https://api.example.com/path"
+    delimiter: none # new_line, array, or none (default)
+
+models:
+  my_object: # corresponds to the root element of the JSON response
+    type: object
+    fields:
+      field1: 
+        type: string
+      fields2: 
+        type: number
+```
+
+##### Environment Variables
+
+| Environment Variable                    | Example          | Description                                       |
+|-----------------------------------------|------------------|---------------------------------------------------|
+| `DATACONTRACT_API_HEADER_AUTHORIZATION` | `Bearer <token>` | The value for the `authorization` header. Optional. |
+
+
 #### Local
 
 Data Contract CLI can test local files in parquet, json, csv, or delta format.
@@ -845,7 +923,7 @@ models:
 │                      terraform|avro-idl|sql|sql-query|mer                                        │
 │                      maid|html|go|bigquery|dbml|spark|sql                                        │
 │                      alchemy|data-caterer|dcs|markdown|ic                                        │
-│                      eberg|custom|excel]                                                         │
+│                      eberg|custom|excel|dqx]                                                         │
 │    --output          PATH                                  Specify the file path where the       │
 │                                                            exported data will be saved. If no    │
 │                                                            path is provided, the output will be  │
@@ -865,8 +943,10 @@ models:
 │    --engine          TEXT                                  [engine] The engine used for great    │
 │                                                            expection run.                        │
 │                                                            [default: None]                       │
-│    --template        PATH                                  [custom] The file path of Jinja       │
-│                                                            template.                             │
+│    --template        PATH                                  The file path or URL of a template.   │
+│                                                            For Excel format: path/URL to custom  │
+│                                                            Excel template. For custom format:    │
+│                                                            path to Jinja template.               │
 │                                                            [default: None]                       │
 │    --help                                                  Show this message and exit.           │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
@@ -889,35 +969,36 @@ datacontract export --format html --output datacontract.html
 
 Available export options:
 
-| Type                 | Description                                             | Status |
-|----------------------|---------------------------------------------------------|--------|
-| `html`               | Export to HTML                                          | ✅      |
-| `jsonschema`         | Export to JSON Schema                                   | ✅      |
-| `odcs`               | Export to Open Data Contract Standard (ODCS) V3         | ✅      |
-| `sodacl`             | Export to SodaCL quality checks in YAML format          | ✅      |
-| `dbt`                | Export to dbt models in YAML format                     | ✅      |
-| `dbt-sources`        | Export to dbt sources in YAML format                    | ✅      |
-| `dbt-staging-sql`    | Export to dbt staging SQL models                        | ✅      |
-| `rdf`                | Export data contract to RDF representation in N3 format | ✅      |
-| `avro`               | Export to AVRO models                                   | ✅      |
-| `protobuf`           | Export to Protobuf                                      | ✅      |
-| `terraform`          | Export to terraform resources                           | ✅      |
-| `sql`                | Export to SQL DDL                                       | ✅      |
-| `sql-query`          | Export to SQL Query                                     | ✅      |
-| `great-expectations` | Export to Great Expectations Suites in JSON Format      | ✅      |
-| `bigquery`           | Export to BigQuery Schemas                              | ✅      |
-| `go`                 | Export to Go types                                      | ✅      |
-| `pydantic-model`     | Export to pydantic models                               | ✅      |
-| `DBML`               | Export to a DBML Diagram description                    | ✅      |
-| `spark`              | Export to a Spark StructType                            | ✅      |
-| `sqlalchemy`         | Export to SQLAlchemy Models                             | ✅      |
-| `data-caterer`       | Export to Data Caterer in YAML format                   | ✅      |
-| `dcs`                | Export to Data Contract Specification in YAML format    | ✅      |
-| `markdown`           | Export to Markdown                                      | ✅      |
+| Type                 | Description                                             | Status  |
+|----------------------|---------------------------------------------------------|---------|
+| `html`               | Export to HTML                                          | ✅       |
+| `jsonschema`         | Export to JSON Schema                                   | ✅       |
+| `odcs`               | Export to Open Data Contract Standard (ODCS) V3         | ✅       |
+| `sodacl`             | Export to SodaCL quality checks in YAML format          | ✅       |
+| `dbt`                | Export to dbt models in YAML format                     | ✅       |
+| `dbt-sources`        | Export to dbt sources in YAML format                    | ✅       |
+| `dbt-staging-sql`    | Export to dbt staging SQL models                        | ✅       |
+| `rdf`                | Export data contract to RDF representation in N3 format | ✅       |
+| `avro`               | Export to AVRO models                                   | ✅       |
+| `protobuf`           | Export to Protobuf                                      | ✅       |
+| `terraform`          | Export to terraform resources                           | ✅       |
+| `sql`                | Export to SQL DDL                                       | ✅       |
+| `sql-query`          | Export to SQL Query                                     | ✅       |
+| `great-expectations` | Export to Great Expectations Suites in JSON Format      | ✅       |
+| `bigquery`           | Export to BigQuery Schemas                              | ✅       |
+| `go`                 | Export to Go types                                      | ✅       |
+| `pydantic-model`     | Export to pydantic models                               | ✅       |
+| `DBML`               | Export to a DBML Diagram description                    | ✅       |
+| `spark`              | Export to a Spark StructType                            | ✅       |
+| `sqlalchemy`         | Export to SQLAlchemy Models                             | ✅       |
+| `data-caterer`       | Export to Data Caterer in YAML format                   | ✅       |
+| `dcs`                | Export to Data Contract Specification in YAML format    | ✅       |
+| `markdown`           | Export to Markdown                                      | ✅       |
 | `iceberg`            | Export to an Iceberg JSON Schema Definition             | partial |
-| `excel`              | Export to ODCS Excel Template                           | ✅      |
-| `custom`             | Export to Custom format with Jinja                      | ✅      |
-| Missing something?   | Please create an issue on GitHub                        | TBD    |
+| `excel`              | Export to ODCS Excel Template                           | ✅       |
+| `custom`             | Export to Custom format with Jinja                      | ✅       |
+| `dqx`                | Export to DQX in YAML format                            | ✅       |
+| Missing something?   | Please create an issue on GitHub                        | TBD     |
 
 #### SQL
 
@@ -2008,6 +2089,7 @@ We are happy to receive your contributions. Propose your change in an issue or d
 
 ## Companies using this tool
 
+- [Entropy Data](https://www.entropy-data.com)
 - [INNOQ](https://innoq.com)
 - [Data Catering](https://data.catering/)
 - [Oliver Wyman](https://www.oliverwyman.com/)
@@ -2026,7 +2108,7 @@ We are happy to receive your contributions. Propose your change in an issue or d
 
 ## Credits
 
-Created by [Stefan Negele](https://www.linkedin.com/in/stefan-negele-573153112/) and [Jochen Christ](https://www.linkedin.com/in/jochenchrist/).
+Created by [Stefan Negele](https://www.linkedin.com/in/stefan-negele-573153112/), [Jochen Christ](https://www.linkedin.com/in/jochenchrist/), and [Simon Harrer]().
 
 
 
