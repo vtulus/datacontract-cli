@@ -7,10 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+## [0.10.35] - 2025-08-25
+
+### Added
+
+- Export to DQX : datacontract export --format dqx (#846)
+- API `/test` endpoint now supports `publish_url` parameter to publish test results to a URL. (#853)
+- The Spark importer and exporter now also exports the description of columns via the additional metadata of StructFields (#868)
+
+### Fixed
+
+- Improved regex for extracting Azure storage account names from URLs with containerName@storageAccountName format (#848)
+- JSON Schema Check: Add globbing support for local JSON files
+
+
+## [0.10.34] - 2025-08-06
+
+### Added
+
+- `datacontract test` now supports HTTP APIs.
+- `datacontract test` now supports Athena.
+
+### Fixed
+
+- Avro Importer: Optional and required enum types are now supported (#804)
+
+
 ## [0.10.33] - 2025-07-29
 
 ### Added
 - Export to Excel: Convert ODCS YAML to Excel https://github.com/datacontract/open-data-contract-standard-excel-template (#742)
+- Extra properties in Markdown export. (#842)
 
 
 ## [0.10.32] - 2025-07-28
@@ -47,6 +74,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - `pytest tests\test_api.py`: Fixed an issue where special characters were not read correctly from file.
+- `datacontract export --format mermaid`: Fixed an issue where the `mermaid` export did not handle references correctly 
 
 ## [0.10.28] - 2025-06-05
 
