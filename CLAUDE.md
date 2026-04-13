@@ -25,6 +25,19 @@ uv python pin 3.11
 uv pip install -e '.[dev]'
 ```
 
+### Java (required for PySpark tests)
+
+Tests that use PySpark (e.g., `test_test_kafka.py`, `test_test_delta.py`, `test_test_dataframe.py`, `test_import_spark.py`) require Java 21. Set `JAVA_HOME` to a Java 21 installation before running these tests.
+
+```bash
+# Using SDKMAN
+source ~/.sdkman/bin/sdkman-init.sh
+sdk use java 21-open
+
+# Or set JAVA_HOME directly
+export JAVA_HOME=$(/usr/libexec/java_home -v 21)
+```
+
 ## Common Commands
 
 ### Testing
@@ -77,11 +90,9 @@ datacontract export --format html datacontract.yaml --output datacontract.html
 # Import from a different format
 datacontract import --format sql --source my-ddl.sql --dialect postgres --output datacontract.yaml
 
-# Find differences between data contracts
-datacontract diff datacontract-v1.yaml datacontract-v2.yaml
+# Show a changelog between two data contracts
+datacontract changelog datacontract-v1.yaml datacontract-v2.yaml
 
-# Check for breaking changes
-datacontract breaking datacontract-v1.yaml datacontract-v2.yaml
 ```
 
 ## Project Architecture
@@ -104,7 +115,7 @@ The Data Contract CLI is an open-source command-line tool for working with data 
 
 5. **Linting (`datacontract/lint/`)**: Tools for validating data contract files against schema and best practices.
 
-6. **Breaking Change Detection (`datacontract/breaking/`)**: Logic for identifying breaking changes between versions.
+6. **Changelog (`datacontract/changelog/`)**: Semantic comparison of ODCS data contracts.
 
 ### Extension Pattern
 
@@ -117,6 +128,7 @@ The project uses factory patterns for extensibility:
 - Tests are organized in the `tests/` directory
 - Many tests use fixtures in `tests/fixtures/` which provide sample data contracts and test data
 - Supports integration testing with various databases and data stores
+- **Tests describe expected behavior, not actual behavior.** Write the test for what the code *should* do. If the test fails, fix the code under test, not the test (unless there is a justified reason for simplification).
 
 ## Code Conventions
 
