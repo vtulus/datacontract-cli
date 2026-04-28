@@ -1,8 +1,8 @@
+import logging
 import re
 import uuid
 from dataclasses import dataclass
 from typing import List, Optional
-from venv import logger
 
 import yaml
 from open_data_contract_standard.model import (
@@ -16,6 +16,8 @@ from open_data_contract_standard.model import (
 from datacontract.export.sql_type_converter import convert_to_sql_type
 from datacontract.model.run import Check
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class QuotingConfig:
@@ -23,6 +25,18 @@ class QuotingConfig:
     quote_field_name_with_backticks: bool = False
     quote_model_name: bool = False
     quote_model_name_with_backticks: bool = False
+
+
+def _escape_sql_string_values(values):
+    """Escape single quotes in string values for use in SodaCL checks.
+
+    SodaCL renders valid/invalid values directly into SQL IN clauses, so single
+    quotes inside string values (e.g. "peter's") must be escaped as two single
+    quotes (e.g. "peter''s") to produce valid SQL.
+    """
+    if values is None:
+        return None
+    return [v.replace("'", "''") if isinstance(v, str) else v for v in values]
 
 
 def _quote_field_name(field_name: str, quoting_config: QuotingConfig) -> str:
@@ -63,11 +77,13 @@ def _get_schema_custom_property_value(schema: SchemaObject, key: str) -> Optiona
     return None
 
 
-def create_checks(data_contract: OpenDataContractStandard, server: Server) -> List[Check]:
+def create_checks(data_contract: OpenDataContractStandard, server: Server, schema_name: str = "all") -> List[Check]:
     checks: List[Check] = []
     if data_contract.schema_ is None:
         return checks
     for schema_obj in data_contract.schema_:
+        if schema_name != "all" and schema_obj.name != schema_name:
+            continue
         schema_checks = to_schema_checks(schema_obj, server)
         checks.extend(schema_checks)
     checks.extend(to_servicelevel_checks(data_contract))
@@ -84,21 +100,21 @@ def to_schema_checks(schema_object: SchemaObject, server: Server) -> List[Check]
 
     type1 = server.type if server and server.type else None
     config = QuotingConfig(
-        quote_field_name=type1 in ["postgres", "sqlserver", "azure", "snowflake"],
-        quote_field_name_with_backticks=type1 in ["databricks"],
-        quote_model_name=type1 in ["postgres", "sqlserver", "snowflake"],
-        quote_model_name_with_backticks=type1 == "bigquery",
+        quote_field_name=type1 in ["postgres", "sqlserver", "snowflake", "azure", "s3", "gcs", "local"],
+        quote_field_name_with_backticks=type1 in ["databricks", "bigquery", "mysql"],
+        quote_model_name=type1 in ["postgres", "sqlserver", "snowflake", "azure", "s3", "gcs", "local"],
+        quote_model_name_with_backticks=type1 in ["databricks", "bigquery", "mysql"],
     )
     quoting_config = config
 
     for prop in properties:
         property_name = prop.name
-        logical_type = prop.logicalType
 
         checks.append(check_property_is_present(schema_name, property_name, quoting_config))
-        if check_types and logical_type is not None:
+        if check_types and (prop.physicalType is not None or prop.logicalType is not None):
             sql_type: str = convert_to_sql_type(prop, server_type)
-            checks.append(check_property_type(schema_name, property_name, sql_type, quoting_config))
+            if sql_type is not None:
+                checks.append(check_property_type(schema_name, property_name, sql_type, quoting_config))
         if prop.required:
             checks.append(check_property_required(schema_name, property_name, quoting_config))
         if prop.unique:
@@ -210,6 +226,9 @@ def check_property_is_present(model_name, field_name, quoting_config: QuotingCon
 def check_property_type(
     model_name: str, field_name: str, expected_type: str, quoting_config: QuotingConfig = QuotingConfig()
 ):
+    if expected_type is None:
+        logger.warning(f"Cannot build type check for {model_name}.{field_name}: expected_type is None.")
+        return None
     check_type = "field_type"
     check_key = f"{model_name}__{field_name}__{check_type}"
     sodacl_check_dict = {
@@ -432,7 +451,7 @@ def check_property_not_equal(
             {
                 f"invalid_count({field_name_for_soda}) = 0": {
                     "name": check_key,
-                    "invalid values": [value],
+                    "invalid values": _escape_sql_string_values([value]),
                 },
             }
         ],
@@ -461,7 +480,7 @@ def check_property_enum(model_name: str, field_name: str, enum: list, quoting_co
             {
                 f"invalid_count({field_name_for_soda}) = 0": {
                     "name": check_key,
-                    "valid values": enum,
+                    "valid values": _escape_sql_string_values(enum),
                 },
             }
         ],
@@ -639,7 +658,7 @@ def check_property_invalid_values(
     }
 
     if valid_values is not None:
-        sodacl_check_config["valid values"] = valid_values
+        sodacl_check_config["valid values"] = _escape_sql_string_values(valid_values)
 
     sodacl_check_dict = {
         checks_for(model_name, quoting_config, check_type): [
@@ -681,7 +700,7 @@ def check_property_missing_values(
     if missing_values is not None:
         filtered_missing_values = [v for v in missing_values if v is not None]
         if filtered_missing_values:
-            sodacl_check_config["missing values"] = filtered_missing_values
+            sodacl_check_config["missing values"] = _escape_sql_string_values(filtered_missing_values)
 
     sodacl_check_dict = {
         checks_for(model_name, quoting_config, check_type): [
@@ -736,10 +755,10 @@ def check_quality_list(
         elif quality.type == "sql":
             if property_name is None:
                 check_key = f"{schema_name}__quality_sql_{count}"
-                check_type = "field_quality_sql"
+                check_type = "model_quality_sql"
             else:
                 check_key = f"{schema_name}__{property_name}__quality_sql_{count}"
-                check_type = "model_quality_sql"
+                check_type = "field_quality_sql"
             threshold = to_sodacl_threshold(quality)
             query = prepare_query(quality, schema_name, property_name, quoting_config, server)
             if query is None:

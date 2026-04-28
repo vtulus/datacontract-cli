@@ -1,6 +1,5 @@
 from datacontract_specification.model import DataContractSpecification
 from pyspark.sql import types
-from pyspark.testing import assertSchemaEqual
 from typer.testing import CliRunner
 
 from datacontract.cli import app
@@ -14,7 +13,7 @@ def test_cli():
     runner = CliRunner()
     result = runner.invoke(
         app,
-        ["export", "./fixtures/spark/export/datacontract.yaml", "--format", "spark"],
+        ["export", "spark", "./fixtures/spark/export/datacontract.yaml"],
     )
     assert result.exit_code == 0
     assert result.output == expected_str
@@ -26,8 +25,8 @@ def test_to_spark_schema():
     result = to_spark_dict(data_contract)
 
     assert len(result) == 2
-    assertSchemaEqual(result.get("orders"), expected_dict.get("orders"))
-    assertSchemaEqual(result.get("customers"), expected_dict.get("customers"))
+    assert result.get("orders") == expected_dict.get("orders")
+    assert result.get("customers") == expected_dict.get("customers")
 
 
 expected_str = """orders = StructType([

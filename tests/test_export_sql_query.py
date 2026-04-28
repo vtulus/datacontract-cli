@@ -8,7 +8,7 @@ from datacontract.data_contract import DataContract
 
 def test_cli():
     runner = CliRunner()
-    result = runner.invoke(app, ["export", "./fixtures/postgres-export/datacontract.yaml", "--format", "sql-query"])
+    result = runner.invoke(app, ["export", "sql-query", "./fixtures/postgres-export/datacontract.yaml"])
     assert result.exit_code == 0
 
 
@@ -41,5 +41,21 @@ select
     CUSTOMER_EMAIL_ADDRESS,
     PROCESSING_TIMESTAMP
 from orders
+"""
+    assert actual.strip() == expected.strip()
+
+
+def test_to_sql_query_physical_name():
+    actual = DataContract(data_contract_file="fixtures/postgres-export-physical-name/datacontract.yaml").export(
+        "sql-query"
+    )
+    expected = """
+-- Data Contract: postgres-physical-name
+-- SQL Dialect: postgres
+select
+    FIELD_ONE,
+    FIELD_TWO,
+    field_three
+from my_table
 """
     assert actual.strip() == expected.strip()

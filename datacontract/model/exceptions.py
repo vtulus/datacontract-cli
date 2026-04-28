@@ -1,3 +1,5 @@
+import os
+
 from datacontract.model.run import ResultEnum
 
 
@@ -36,3 +38,35 @@ class DataContractException(Exception):
         super().__init__(
             f"{self.message}: [{self.type}] {self.name} - {self.model} - {self.result} - {self.reason} - {self.engine}"
         )
+
+
+class DataContractValidationErrors(DataContractException):
+    def __init__(self, errors: list[DataContractException]):
+        self.errors = errors
+        first_error = errors[0]
+        super().__init__(
+            type=first_error.type,
+            name=first_error.name,
+            reason=first_error.reason,
+            engine=first_error.engine,
+            model=first_error.model,
+            original_exception=first_error.original_exception,
+            result=first_error.result,
+            message="Run operation failed with multiple validation errors",
+        )
+
+
+def require_env(name: str, *, server_type: str) -> str:
+    """Return the value of env var ``name`` or raise a DataContractException.
+
+    Empty strings count as missing — drivers typically reject them the same way they reject None.
+    """
+    value = os.getenv(name)
+    if not value:
+        raise DataContractException(
+            type=f"{server_type}-connection",
+            name=f"missing_env_{name}",
+            reason=f"Required environment variable {name} is not set. Set it to connect to {server_type}.",
+            engine="datacontract",
+        )
+    return value

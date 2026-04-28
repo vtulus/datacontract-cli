@@ -16,6 +16,7 @@ from datacontract.engines.soda.connections.databricks import to_databricks_soda_
 from datacontract.engines.soda.connections.duckdb_connection import get_duckdb_connection
 from datacontract.engines.soda.connections.impala import to_impala_soda_configuration
 from datacontract.engines.soda.connections.kafka import create_spark_session, read_kafka_topic
+from datacontract.engines.soda.connections.mysql import to_mysql_soda_configuration
 from datacontract.engines.soda.connections.postgres import to_postgres_soda_configuration
 from datacontract.engines.soda.connections.snowflake import to_snowflake_soda_configuration
 from datacontract.engines.soda.connections.sqlserver import to_sqlserver_soda_configuration
@@ -30,6 +31,8 @@ def check_soda_execute(
     server: Server,
     spark: "SparkSession" = None,
     duckdb_connection: "DuckDBPyConnection" = None,
+    schema_name: str = "all",
+    check_categories: set[str] | None = None,
 ):
     from soda.common.config_helper import ConfigHelper
 
@@ -46,7 +49,7 @@ def check_soda_execute(
     if server.type in ["s3", "gcs", "azure", "local"]:
         if server.format in ["json", "parquet", "csv", "delta"]:
             run.log_info(f"Configuring engine soda-core to connect to {server.type} {server.format} with duckdb")
-            con = get_duckdb_connection(data_contract, server, run, duckdb_connection)
+            con = get_duckdb_connection(data_contract, server, run, duckdb_connection, schema_name=schema_name)
             scan.add_duckdb_connection(duckdb_connection=con, data_source_name=server.type)
             scan.set_data_source_name(server.type)
         else:
@@ -71,6 +74,10 @@ def check_soda_execute(
         scan.set_data_source_name(server.type)
     elif server.type == "postgres":
         soda_configuration_str = to_postgres_soda_configuration(server)
+        scan.add_configuration_yaml_str(soda_configuration_str)
+        scan.set_data_source_name(server.type)
+    elif server.type == "mysql":
+        soda_configuration_str = to_mysql_soda_configuration(server)
         scan.add_configuration_yaml_str(soda_configuration_str)
         scan.set_data_source_name(server.type)
     elif server.type == "databricks":
@@ -159,6 +166,8 @@ def check_soda_execute(
         name = scan_result.get("name")
         check = get_check(run, scan_result)
         if check is None:
+            if check_categories is not None and "custom" not in check_categories:
+                continue
             check = Check(
                 id=str(uuid.uuid4()),
                 category="custom",
@@ -182,13 +191,14 @@ def check_soda_execute(
         )
 
     if scan.has_error_logs():
-        run.log_warn("Engine soda-core has errors. See the logs for details.")
+        reason = _first_error_message(scan_results) or "Engine soda-core has errors. See the logs for details."
+        run.log_error(f"Engine soda-core has errors: {reason}")
         run.checks.append(
             Check(
                 type="general",
                 name="Data Contract Tests",
-                result=ResultEnum.warning,
-                reason="Engine soda-core has errors. See the logs for details.",
+                result=ResultEnum.failed,
+                reason=reason,
                 engine="soda-core",
             )
         )
@@ -200,6 +210,15 @@ def get_check(run, scan_result) -> Check | None:
     if check_by_name is not None:
         return check_by_name
 
+    return None
+
+
+def _first_error_message(scan_results: dict) -> str | None:
+    for log in scan_results.get("logs") or []:
+        if log.get("level") == "ERROR":
+            message = log.get("message")
+            if message:
+                return message.strip().splitlines()[0]
     return None
 
 

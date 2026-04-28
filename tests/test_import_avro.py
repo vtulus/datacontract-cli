@@ -1,8 +1,10 @@
+import pytest
 import yaml
 from typer.testing import CliRunner
 
 from datacontract.cli import app
 from datacontract.data_contract import DataContract
+from datacontract.model.exceptions import DataContractException
 
 # logging.basicConfig(level=logging.DEBUG, force=True)
 
@@ -13,7 +15,6 @@ def test_cli():
         app,
         [
             "import",
-            "--format",
             "avro",
             "--source",
             "fixtures/avro/data/orders.avsc",
@@ -369,10 +370,12 @@ schema:
     required: true
   - name: some_bytes_decimal
     physicalType: bytes
+    customProperties:
+    - property: precision
+      value: 25
+    - property: scale
+      value: 2
     logicalType: number
-    logicalTypeOptions:
-      precision: 25
-      scale: 2
     required: true
 """
     print("Result:\n", result.to_yaml())
@@ -417,3 +420,10 @@ schema:
 """
     print("Result:\n", result.to_yaml())
     assert yaml.safe_load(result.to_yaml()) == yaml.safe_load(expected)
+
+
+def test_import_avro_multi_branch_union_raises_error():
+    with pytest.raises(DataContractException) as exc_info:
+        DataContract.import_from_source("avro", "fixtures/avro/data/multi_union.avsc")
+    assert "multiple non-null types" in str(exc_info.value.reason)
+    assert "multi_type_field" in str(exc_info.value.reason)

@@ -7,9 +7,108 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
-### Added
+### Fixed
+- `changelog` command help text now advertises `(url or path)` for V1/V2 arguments, clarifying that HTTP/HTTPS URLs are accepted (#1162)
+- **breaking:** `test` command now exits non-zero when a server is specified, but soda-core fails to connect or authenticate (#1181)
+- correct swapped `check_type` labels  `model_qualty_sql` and `field_quality_sql` (#1187)
+- `import spark` now emits a native Spark SQL physicalType (e.g. `string`) instead of Python repr (e.g. `StringType()`). Contracts imported using Spark in v0.11.0–v0.12.1 did not perform type checks and must be re-imported. (#1048)
 
+## [0.12.1] - 2026-04-21
+
+### Fixed
+- make `--schema` a deprecated alias for `--json-schema` to (will be removed in v0.13.0)
+
+## [0.12.0] - 2026-04-20
+
+This release introduces several changes to improve the usability of `datacontract-cli` for AI Agents.
+
+- **Breaking**: Several changes in the CLI syntax (#1157):
+> Fix in v0.12.1: re-added `--schema` as alias for the new `--json-schema` (will be removed in v0.13.0)
+
+| Command                                    | Old option                                    | New option                             |
+  |--------------------------------------------|-----------------------------------------------|----------------------------------------|
+  | `lint`, `test`, `ci`, `publish`, `catalog` | `--schema <PATH>` (will work until v0.13.0)   | `--json-schema <PATH>`                 |
+  | `export`, `import`                         | `--format <FORMAT> <OPTIONS>`                 | `<FORMAT> <OPTIONS>` (drop `--format`) |
+  | **Export options:**                        |                                               |                                        |
+  | `export --format dbt`                      | `--format dbt`                                | `dbt-models` (format renamed)          |
+  | `export --format great-expectations`       | `--sql-server-type <TYPE>`                    | `--dialect <TYPE>`                     |
+  | `export --format rdf`                      | `--rdf-base <URI>`                            | `--base <URI>`                         |
+  | `export --format sql`                      | `--sql-server-type <TYPE>`                    | `--dialect <TYPE>`                     |
+  | `export --format sql-query`                | `--sql-server-type <TYPE>`                    | `--dialect <TYPE>`                     |
+  | **Import options:**                        |                                               |                                        |
+  | `import --format bigquery`                 | `--bigquery-[project\|dataset\|table] <NAME>` | `--[project\|dataset\|table] <NAME>`   |
+  | `import --format dbt`                      | `--dbt-model <NAME>`                          | `--model <NAME>`                       |
+  | `import --format glue`                     | `--source <NAME>`, `--glue-table <NAME>`      | `--database <NAME>`, `--table <NAME>`  |
+  | `import --format iceberg`                  | `--iceberg-table <NAME>`                      | `--table <NAME>`                       |
+  | `import --format unity`                    | `--unity-table-full-name <NAME>`              | `--table <NAME>`                       |
+  | `import --format spark`                    | `--source <NAMES>`                            | `--tables <NAMES>`                     |
+  | `import`                                   | `--template`                                  | dropped (was a no-op)                  |
+
+The `--schema` option (referring to the ODCS JSON schema) was renamed to `--json-schema` to avoid confusion with `--schema-name`, which refers to the schema within the data contract to test for.
+
+- Error messages for uncaught exceptions are shortened now. Pass `--debug` (or set `DATACONTRACT_CLI_DEBUG=1`) to see the full traceback. (#1175)
+- Add example calls to `--help` outputs (#1176)
+- Add explicit errors when required env vars for soda connections are missing (#1177)
+- Validate some of the CLI options against their allowed values instead of accepting any string (#1178)
+
+
+## [0.11.9] - 2026-04-20
+
+### Added
+- Added `--checks` option to `test` command to selectively run check categories: `schema`, `quality`, `servicelevel` (#678)
+- Added `--schema-name` option to `test` command to test a specific schema instead of all schemas (#1079,#1085 @kelsoufi-sanofi)
+
+### Fixed
+- Move `precision`/`scale` for `number` types from `logicalTypeOptions` to `customProperties` (#1145,#1160 @davidb-tada)
+- Emit placeholder server values in SQL importer so generated contracts pass lint (#1146,#1152 @Ai-chan-0411)
+- Fix Protobuf export for arrays of objects and improve message/enum naming to UpperCamelCase (#1012 @Schokuroff)
+- Exit with code 1 when `--server` name is not found (#1153,#1161 @Ai-chan-0411)
+
+Thanks to @kelsoufi-sanofi for the new `--schema-name` option on `test`, and to @Schokuroff, @Ai-chan-0411, and @davidb-tada for their contributions.
+
+## [0.11.8] - 2026-04-10
+
+### Added
+- Added `ci` command for CI/CD-optimized test runs: multi-file support, GitHub Actions annotations and step summary, Azure DevOps annotations, `--fail-on` flag, `--json` output (#1114)
+- Added `changelog` command and API endpoint (#1118 @davidb-tada)
+- Added opt-in `--all-errors` mode for `datacontract lint` to report all JSON Schema validation errors, with matching `all_errors` support in the Python library and API (#1125 @jmbenedetto)
+- Added `--schema-name` option to custom model export (#978 @AntoineGiraud)
+
+### Fixed
+- Avro importer now raises an error for union fields with multiple non-null types, which are not supported by ODCS (#1124)
+- Fix SQL export generating multiple PRIMARY KEY constraints for composite keys (#1026,#1092 @barry0451 @dwestheide)
+- Preserve parametrized physicalTypes for SQL export (#1086,#1093 @barry0451 @alexander-griesbeck)
+- Fix incorrect SQL type mappings: SQL Server `double`/`jsonb`, MySQL bare `varchar`, missing Trino types (#1110)
+- Fix markdown export breaking table structure when extra field values contain pipe characters (#832,#1117 @barry0451 @grepwood)
+- Fix dbt import using incorrect physicalType instead of actual materialization type (#1136)
+- Remove unnecessary numpy dependency from databricks and kafka extras (#1135 @kayhendriksen)
+
+Special thanks to @davidb-tada for the outstanding contribution of the new `changelog` command and API endpoint! Also thanks to @barry0451 for multiple quality fixes across the SQL exporter and markdown export, and to @AntoineGiraud and @jmbenedetto for their feature contributions.
+
+## [0.11.7] - 2026-03-24
+
+### Fixed
+- Escape single quotes in string values for SodaCL checks (#1090)
+- Escape BigQuery field and model names with backticks for SodaCL checks (#736)
+- Escape Databricks model names with backticks for SodaCL checks
+- Fixed catalog export SpecView not having a tags property for the index.html template (#1059)
+- Fix SQL importer type mappings: binary types, datetime/time, uuid now map to correct ODCS logicalType and format (#790)
+
+### Added
+- Added support for MySQL for data contract tests (#1101)
+- Support additional PyArrow types in Parquet importer (#1091)
+- Populate `logicalTypeOptions.format` for SQL import from binary and uuid types (#790)
+- Snowflake DDL import with tags, descriptions, and template variable handling (#790)
+
+## [0.11.6] - 2026-03-17
+
+### Fixed
+- Fix parser error for CSV / Parquet table names containing special characters (#1066)
+- Fix BigQuery export failing with "Unsupported type" for parameterized physicalType like `NUMERIC(18, 4)` (#1083)
+
+### Added
 - Added JSON output format for test results (`--output-format json`)
+- Added Azure AD / Entra ID authentication support for SQL Server and Microsoft Fabric
 
 ## [0.11.5] - 2026-02-19
 

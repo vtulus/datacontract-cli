@@ -18,6 +18,10 @@ status: draft
 servers:
   - server: sqlserver
     type: sqlserver
+    host: my_host
+    port: 1433
+    database: my_database
+    schema: my_schema
 schema:
   - name: my_table
     physicalType: table
@@ -85,18 +89,22 @@ schema:
         description: Large integer (-9 quintillion to 9 quintillion)
       - name: field_decimal
         logicalType: number
-        logicalTypeOptions:
-          precision: 10
-          scale: 2
         physicalType: NUMERIC(10, 2)
         description: Fixed precision decimal
+        customProperties:
+        - property: precision
+          value: 10
+        - property: scale
+          value: 2
       - name: field_numeric
         logicalType: number
-        logicalTypeOptions:
-          precision: 10
-          scale: 2
         physicalType: NUMERIC(10, 2)
         description: Same as DECIMAL
+        customProperties:
+        - property: precision
+          value: 10
+        - property: scale
+          value: 2
       - name: field_float
         logicalType: number
         physicalType: FLOAT
@@ -114,31 +122,37 @@ schema:
         physicalType: DATE
         description: Date only (YYYY-MM-DD)
       - name: field_time
-        logicalType: string
+        logicalType: time
         physicalType: TIME
         description: Time only (HH:MM:SS)
       - name: field_datetime2
-        logicalType: date
+        logicalType: timestamp
         physicalType: DATETIME2
         description: More precise datetime
       - name: field_smalldatetime
-        logicalType: date
+        logicalType: timestamp
         physicalType: SMALLDATETIME
         description: Less precise datetime
       - name: field_datetimeoffset
-        logicalType: date
+        logicalType: timestamp
         physicalType: DATETIMEOFFSET
         description: Datetime with time zone
       - name: field_binary
-        logicalType: array
+        logicalType: string
+        logicalTypeOptions:
+          format: binary
         physicalType: BINARY(16)
         description: Fixed-length binary
       - name: field_varbinary
-        logicalType: array
+        logicalType: string
+        logicalTypeOptions:
+          format: binary
         physicalType: VARBINARY(100)
         description: Variable-length binary
       - name: field_uniqueidentifier
         logicalType: string
+        logicalTypeOptions:
+          format: uuid
         physicalType: UNIQUEIDENTIFIER
         description: GUID
       - name: field_xml
