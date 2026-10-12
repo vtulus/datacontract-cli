@@ -4,6 +4,7 @@ from testcontainers.postgres import PostgresContainer
 from datacontract.data_contract import DataContract
 from datacontract.model.exceptions import DataContractException
 from datacontract.model.run import ResultEnum
+from tests.dcs_deprecation import assert_dcs_deprecation_is_the_only_warning, without_dcs_deprecation
 
 postgres = PostgresContainer("postgres:16")
 
@@ -29,8 +30,8 @@ def test_test_quality_valid(postgres_container, monkeypatch):
     run = data_contract.test()
 
     print(run.pretty())
-    assert run.result == "passed"
-    assert all(check.result == "passed" for check in run.checks)
+    assert_dcs_deprecation_is_the_only_warning(run)
+    assert all(check.result == "passed" for check in without_dcs_deprecation(run))
 
 
 def test_test_quality_invalid(postgres_container, monkeypatch):
@@ -78,7 +79,7 @@ def _init_sql(file_path):
             result="failed",
             name="postgres extra missing",
             reason="Install the extra datacontract-cli[postgres] to use postgres",
-            engine="datacontract",
+            engine="datacontract-cli",
             original_exception=e,
         )
 

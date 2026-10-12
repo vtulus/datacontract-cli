@@ -1,0 +1,199 @@
+"""Engine-neutral check intermediate representation (IR).
+
+``create_checks`` (see ``create_checks.py``) walks an ODCS data contract and
+produces a list of :class:`CheckSpec` objects. The ibis execution engine
+(``datacontract/engines/ibis``) compiles each :class:`CheckSpec` into an ibis
+expression, runs it, and evaluates the structured :class:`Threshold`.
+
+This IR replaces the SodaCL-string ``Check.implementation`` that the old
+``data_contract_checks.py`` produced: it carries *what* each check asserts
+(metric + threshold + arguments) rather than a backend-specific SQL/YAML string.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum
+from typing import TYPE_CHECKING, Any, List, Optional
+
+if TYPE_CHECKING:
+    from open_data_contract_standard.model import SchemaProperty
+
+
+class MetricType(str, Enum):
+    """The kind of value a check computes against a model/field."""
+
+    ROW_COUNT = "row_count"
+    MISSING_COUNT = "missing_count"
+    DUPLICATE_COUNT = "duplicate_count"
+    INVALID_COUNT = "invalid_count"
+    MISSING_REFERENCE_COUNT = "missing_reference_count"
+    FIELD_PRESENT = "field_present"
+    FIELD_TYPE = "field_type"
+    FIELD_PHYSICAL_TYPE = "field_physical_type"
+    FIELD_NESTED_TYPE = "field_nested_type"
+    FRESHNESS = "freshness"
+    RETENTION = "retention"
+    CUSTOM_SQL = "custom_sql"
+    # A check the new engine cannot run (e.g. raw SodaCL custom checks).
+    UNSUPPORTED = "unsupported"
+
+
+# Metrics answered from schema introspection alone, without reading row values.
+# A positive allowlist: any future metric defaults conservatively to data-reading.
+METADATA_METRICS = {
+    MetricType.FIELD_PRESENT,
+    MetricType.FIELD_TYPE,
+    MetricType.FIELD_PHYSICAL_TYPE,
+    MetricType.FIELD_NESTED_TYPE,
+}
+
+
+class Op(str, Enum):
+    EQ = "="
+    NE = "!="
+    GT = ">"
+    GE = ">="
+    LT = "<"
+    LE = "<="
+    BETWEEN = "between"
+    NOT_BETWEEN = "not_between"
+
+
+@dataclass
+class Threshold:
+    """A structured comparison applied to a computed metric value."""
+
+    op: Op
+    value: Any = None
+    value2: Any = None  # only used for between / not_between
+
+    def passes(self, actual: Any) -> bool:
+        if actual is None:
+            return False
+        a = actual
+        v = self.value
+        if self.op == Op.EQ:
+            return bool(a == v)
+        if self.op == Op.NE:
+            return bool(a != v)
+        if self.op == Op.GT:
+            return bool(a > v)
+        if self.op == Op.GE:
+            return bool(a >= v)
+        if self.op == Op.LT:
+            return bool(a < v)
+        if self.op == Op.LE:
+            return bool(a <= v)
+        if self.op == Op.BETWEEN:
+            return bool(v <= a <= self.value2)
+        if self.op == Op.NOT_BETWEEN:
+            return not bool(v <= a <= self.value2)
+        return False
+
+    def describe(self) -> str:
+        if self.op == Op.BETWEEN:
+            return f"between {self.value} and {self.value2}"
+        if self.op == Op.NOT_BETWEEN:
+            return f"not between {self.value} and {self.value2}"
+        return f"{self.op.value} {self.value}"
+
+
+@dataclass
+class CheckSpec:
+    """A single, engine-neutral data quality / schema check."""
+
+    key: str
+    category: str  # schema | quality | servicelevel | custom
+    type: str  # stable check type string (e.g. "field_required"), preserved from the legacy engine
+    name: str
+    model: str
+    metric: MetricType
+    field: Optional[str] = None
+    threshold: Optional[Threshold] = None
+
+    # The threshold compares a percentage of rows (ODCS quality.unit: percent)
+    # rather than an absolute count. Only meaningful for the count-of-bad-rows
+    # metrics (missing_count, invalid_count), where the engine divides by the
+    # model row count before applying the threshold.
+    threshold_is_percent: bool = False
+
+    # ODCS quality.severity. A non-blocking severity (e.g. "warning", "info")
+    # downgrades a failing check to a warning instead of a failure. None => fail.
+    severity: Optional[str] = None
+
+    # ODCS quality.dimension (accuracy, completeness, conformity, consistency,
+    # coverage, timeliness, uniqueness). Documentation metadata that `test`
+    # can filter on (--dimension). None for schema and service level checks,
+    # and for quality rules that do not declare one.
+    dimension: Optional[str] = None
+
+    # ODCS quality.id: the author-defined identifier of the quality rule this
+    # check comes from. `test --quality-id` selects a single rule by it.
+    # None for schema and service level checks, and for unidentified rules.
+    quality_id: Optional[str] = None
+
+    # ODCS quality.tags: the author-defined labels of the quality rule this
+    # check comes from. `test --tag` selects rules by them.
+    tags: Optional[List[str]] = None
+
+    # The ODCS quality rule this check comes from, rendered as YAML.
+    # None for schema and service level checks, which no rule declared.
+    quality_definition: Optional[str] = None
+
+    # --- metric arguments -------------------------------------------------
+    missing_values: Optional[List[Any]] = None  # MISSING_COUNT / INVALID_COUNT
+    valid_values: Optional[List[Any]] = None  # INVALID_COUNT
+    invalid_values: Optional[List[Any]] = None  # INVALID_COUNT
+    valid_regex: Optional[str] = None  # INVALID_COUNT
+    valid_min: Any = None  # INVALID_COUNT
+    valid_max: Any = None  # INVALID_COUNT
+    valid_min_length: Optional[int] = None  # INVALID_COUNT
+    valid_max_length: Optional[int] = None  # INVALID_COUNT
+    valid_min_items: Optional[int] = None  # INVALID_COUNT, array columns
+    valid_max_items: Optional[int] = None  # INVALID_COUNT, array columns
+    valid_unique_items: Optional[bool] = None  # INVALID_COUNT, array columns
+
+    expected_category: Optional[str] = None  # FIELD_TYPE: human-readable label (display only)
+    expected_type_label: Optional[str] = None  # FIELD_TYPE: human-readable expected type
+    expected_schema_property: Optional["SchemaProperty"] = None  # FIELD_TYPE: structural comparison
+    expected_physical_type: Optional[str] = None  # FIELD_PHYSICAL_TYPE: contract physicalType
+
+    columns: Optional[List[str]] = None  # DUPLICATE_COUNT across multiple columns; MISSING_REFERENCE_COUNT keys
+
+    referenced_model: Optional[str] = None  # MISSING_REFERENCE_COUNT
+    referenced_columns: Optional[List[str]] = None  # MISSING_REFERENCE_COUNT, pairwise with `columns`
+
+    query: Optional[str] = None  # CUSTOM_SQL (placeholders already substituted)
+    dialect: Optional[str] = None  # CUSTOM_SQL input SQL dialect
+    diagnostics: Optional[dict] = None  # CUSTOM_SQL: reported alongside the measured value
+
+    seconds: Optional[int] = None  # FRESHNESS / RETENTION threshold in seconds
+
+    uses_raw_view: bool = False  # FIELD_PRESENT against the duckdb {model}__raw__ view
+
+    # Preset result/reason for checks that are not executed (UNSUPPORTED).
+    preset_result: Optional[str] = None
+    preset_reason: Optional[str] = None
+
+    @property
+    def requires_data_read(self) -> bool:
+        if self.metric == MetricType.UNSUPPORTED:
+            return False
+        return self.metric not in METADATA_METRICS
+
+    def has_validity_constraints(self) -> bool:
+        return any(
+            v is not None
+            for v in (
+                self.valid_values,
+                self.valid_regex,
+                self.valid_min,
+                self.valid_max,
+                self.valid_min_length,
+                self.valid_max_length,
+                self.valid_min_items,
+                self.valid_max_items,
+                self.valid_unique_items,
+            )
+        )

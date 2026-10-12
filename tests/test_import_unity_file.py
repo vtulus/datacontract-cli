@@ -35,6 +35,21 @@ def test_import_unity():
     assert DataContract(data_contract_str=expected).lint().has_passed()
 
 
+def test_import_unity_complex_types():
+    print("running test_import_unity_complex_types")
+    result = DataContract.import_from_source(
+        "unity", "fixtures/databricks-unity/import/unity_table_schema_complex_types.json"
+    )
+
+    with open("fixtures/databricks-unity/import/datacontract_complex_types.yaml") as file:
+        expected = file.read()
+
+    result_yaml = result.to_yaml()
+    print("Result:\n", result_yaml)
+    assert yaml.safe_load(result_yaml) == yaml.safe_load(expected)
+    assert DataContract(data_contract_str=expected).lint().has_passed()
+
+
 def test_import_unity_with_owner_and_id():
     print("running test_import_unity_with_owner_and_id")
     result = DataContract.import_from_source(
@@ -84,3 +99,28 @@ def test_cli_with_owner_and_id():
     # Verify owner and id are set correctly
     assert output_dict["id"] == "orders-v1"
     assert output_dict["team"]["name"] == "sales-team"
+
+
+SOURCE = "fixtures/databricks-unity/import/unity_table_schema.json"
+
+
+def test_cli_databricks():
+    """`databricks` is the documented name for this importer."""
+    result = CliRunner().invoke(app, ["import", "databricks", "--source", SOURCE])
+
+    assert result.exit_code == 0
+
+
+def test_databricks_and_unity_produce_the_same_contract():
+    """`unity` predates the name and has to keep working."""
+    assert DataContract.import_from_source("databricks", SOURCE).to_yaml() == (
+        DataContract.import_from_source("unity", SOURCE).to_yaml()
+    )
+
+
+def test_unity_stays_available_but_is_hidden_from_help():
+    help_output = CliRunner().invoke(app, ["import", "--help"]).output
+
+    assert "databricks" in help_output
+    assert "unity" not in help_output
+    assert CliRunner().invoke(app, ["import", "unity", "--source", SOURCE]).exit_code == 0

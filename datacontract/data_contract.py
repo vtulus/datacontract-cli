@@ -1,5 +1,7 @@
+import inspect
 import logging
 import typing
+from importlib import metadata
 
 from open_data_contract_standard.model import OpenDataContractStandard, Team
 
@@ -7,6 +9,10 @@ if typing.TYPE_CHECKING:
     from duckdb.duckdb import DuckDBPyConnection
     from pyspark.sql import SparkSession
 
+from datacontract.breaking.detector import BreakingChangeDetector
+from datacontract.config import Config
+from datacontract.engines.checks.create_checks import to_schema_name, unexecuted_check_name, unrunnable_reason
+from datacontract.engines.checks.dimensions import default_dimension
 from datacontract.engines.data_contract_test import execute_data_contract_test
 from datacontract.export.exporter import ExportFormat
 from datacontract.export.exporter_factory import exporter_factory
@@ -14,9 +20,70 @@ from datacontract.imports.importer_factory import importer_factory
 from datacontract.init.init_template import get_init_template
 from datacontract.integration.entropy_data import publish_test_results_to_entropy_data
 from datacontract.lint import resolve
+from datacontract.model.breaking import BreakingChangeResult
 from datacontract.model.changelog import ChangelogEntry, ChangelogResult, ChangelogType
-from datacontract.model.exceptions import DataContractException, DataContractValidationErrors
+from datacontract.model.exceptions import (
+    DataContractException,
+    DataContractValidationErrors,
+    DefinitionResolutionError,
+)
 from datacontract.model.run import Check, ResultEnum, Run
+
+logger = logging.getLogger(__name__)
+
+
+def _warning_checks(warnings: list[DataContractException]) -> list[Check]:
+    return [
+        Check(type=warning.type, result=warning.result, name=warning.name, reason=warning.reason, engine=warning.engine)
+        for warning in warnings
+    ]
+
+
+def _unrunnable_rule_checks(data_contract: OpenDataContractStandard) -> list[Check]:
+    """Warnings for quality rules `datacontract test` would not be able to run."""
+    checks = []
+
+    def visit(properties, schema_name, prefix=None):
+        for prop in properties or []:
+            name = prop.physicalName or prop.name
+            field = f"{prefix}.{name}" if prefix else name
+            for quality in prop.quality or []:
+                reason = unrunnable_reason(quality, field)
+                if reason is not None:
+                    checks.append(
+                        Check(
+                            type="lint",
+                            result=ResultEnum.warning,
+                            name=unexecuted_check_name(schema_name, field),
+                            reason=reason,
+                            model=schema_name,
+                            field=field,
+                            engine="datacontract-cli",
+                        )
+                    )
+            visit(prop.properties, schema_name, field)
+            # `[]` marks the array hop, as the check keys do.
+            if prop.items is not None:
+                visit(prop.items.properties, schema_name, f"{field}[]")
+
+    for schema_obj in data_contract.schema_ or []:
+        # Named like the checks `test` reports for the same rules.
+        schema_name = to_schema_name(schema_obj, None)
+        for quality in schema_obj.quality or []:
+            reason = unrunnable_reason(quality, None)
+            if reason is not None:
+                checks.append(
+                    Check(
+                        type="lint",
+                        result=ResultEnum.warning,
+                        name=unexecuted_check_name(schema_name, None),
+                        reason=reason,
+                        model=schema_name,
+                        engine="datacontract-cli",
+                    )
+                )
+        visit(schema_obj.properties, schema_name)
+    return checks
 
 
 class DataContract:
@@ -31,11 +98,23 @@ class DataContract:
         publish_url: str = None,
         spark: "SparkSession" = None,
         duckdb_connection: "DuckDBPyConnection" = None,
-        inline_definitions: bool = True,
+        inline_references: bool = True,
         ssl_verification: bool = True,
         publish_test_results: bool = False,
         all_errors: bool = False,
         check_categories: set[str] | None = None,
+        dimensions: set[str] | None = None,
+        quality_ids: set[str] | None = None,
+        tags: set[str] | None = None,
+        fastapi_url: str = None,
+        include_failed_samples: bool = False,
+        filter: str = None,
+        filters: dict[str, str] | None = None,
+        metadata_only: bool = False,
+        dry_run: bool = False,
+        untrusted_contract: bool = False,
+        allowed_variables: list[str] | None = None,
+        config: "Config | dict[str, str] | None" = None,
     ):
         self._data_contract_file = data_contract_file
         self._data_contract_str = data_contract_str
@@ -47,10 +126,26 @@ class DataContract:
         self._publish_test_results = publish_test_results
         self._spark = spark
         self._duckdb_connection = duckdb_connection
-        self._inline_definitions = inline_definitions
+        self._inline_references = inline_references
         self._ssl_verification = ssl_verification
         self._all_errors = all_errors
         self._check_categories = check_categories
+        self._dimensions = dimensions
+        self._quality_ids = quality_ids
+        self._tags = tags
+        self._fastapi_url = fastapi_url
+        self._include_failed_samples = include_failed_samples
+        self._filter = filter
+        self._filters = filters
+        self._metadata_only = metadata_only
+        self._dry_run = dry_run
+        # The contract came from somewhere the caller does not control (the API
+        # server): the SQL it carries must not reach the host running it, and its
+        # authoritativeDefinitions are resolved against the configured host only.
+        self._untrusted_contract = untrusted_contract
+        # fnmatch globs of the environment variables an untrusted contract may read.
+        self._allowed_variables = allowed_variables
+        self._config = Config.resolve(config)
 
     @classmethod
     def init(cls, template: typing.Optional[str], schema: typing.Optional[str] = None) -> OpenDataContractStandard:
@@ -62,22 +157,29 @@ class DataContract:
         run = Run.create_run()
         try:
             run.log_info("Linting data contract")
-            data_contract = resolve.resolve_data_contract(
+            data_contract, schema_version, warnings = resolve.resolve_data_contract_with_lint_info(
                 self._data_contract_file,
                 self._data_contract_str,
                 self._data_contract,
                 self._schema_location,
-                inline_definitions=self._inline_definitions,
+                inline_references=self._inline_references,
                 all_errors=self._all_errors,
+                config=self._config,
+                use_declared_api_version=True,
+                configured_host_only=self._untrusted_contract,
             )
             run.checks.append(
                 Check(
                     type="lint",
                     result=ResultEnum.passed,
-                    name="Data contract is syntactically valid",
-                    engine="datacontract",
+                    name="Data contract is syntactically valid"
+                    if schema_version is None
+                    else f"Data contract is valid against ODCS v{schema_version}",
+                    engine="datacontract-cli",
                 )
             )
+            run.checks.extend(_warning_checks(warnings))
+            run.checks.extend(_unrunnable_rule_checks(data_contract))
             run.dataContractId = data_contract.id
             run.dataContractVersion = data_contract.version
         except DataContractValidationErrors as e:
@@ -89,14 +191,13 @@ class DataContract:
                         name=error.name,
                         reason=error.reason,
                         engine=error.engine,
-                        details="",
                     )
                 )
                 run.log_error(str(error))
         except DataContractException as e:
-            run.checks.append(
-                Check(type=e.type, result=e.result, name=e.name, reason=e.reason, engine=e.engine, details="")
-            )
+            if self._untrusted_contract and isinstance(e, DefinitionResolutionError):
+                raise  # the reason names the host and what it answered; the API answers with the URL only
+            run.checks.append(Check(type=e.type, result=e.result, name=e.name, reason=e.reason, engine=e.engine))
             run.log_error(str(e))
         except Exception as e:
             run.checks.append(
@@ -105,24 +206,39 @@ class DataContract:
                     result=ResultEnum.error,
                     name="Check Data Contract",
                     reason=str(e),
-                    engine="datacontract",
+                    engine="datacontract-cli",
                 )
             )
             run.log_error(str(e))
         run.finish()
         return run
 
+    def _runtime_info(self) -> str:
+        try:
+            version = metadata.version("datacontract-cli")
+        except metadata.PackageNotFoundError:
+            version = "unknown"
+        if self._fastapi_url is not None:
+            execution = f"running through FastAPI at {self._fastapi_url}"
+        else:
+            execution = "running as CLI locally"
+        return f"Data Contract CLI {version} {execution}"
+
     def test(self) -> Run:
         run = Run.create_run()
         try:
             run.log_info("Testing data contract")
-            data_contract = resolve.resolve_data_contract(
+            run.log_info(self._runtime_info())
+            data_contract, _, warnings = resolve.resolve_data_contract_with_lint_info(
                 self._data_contract_file,
                 self._data_contract_str,
                 self._data_contract,
                 self._schema_location,
-                inline_definitions=self._inline_definitions,
+                inline_references=self._inline_references,
+                config=self._config,
+                configured_host_only=self._untrusted_contract,
             )
+            run.checks.extend(_warning_checks(warnings))
 
             execute_data_contract_test(
                 data_contract,
@@ -132,18 +248,31 @@ class DataContract:
                 self._duckdb_connection,
                 schema_name=self._schema_name,
                 check_categories=self._check_categories,
+                dimensions=self._dimensions,
+                quality_ids=self._quality_ids,
+                tags=self._tags,
+                include_failed_samples=self._include_failed_samples,
+                filter=self._filter,
+                filters=self._filters,
+                metadata_only=self._metadata_only,
+                dry_run=self._dry_run,
+                config=self._config,
+                untrusted_contract=self._untrusted_contract,
+                allowed_variables=self._allowed_variables,
             )
 
         except DataContractException as e:
+            if self._untrusted_contract and isinstance(e, DefinitionResolutionError):
+                raise  # the reason names the host and what it answered; the API answers with the URL only
             run.checks.append(
                 Check(
                     type=e.type,
+                    dimension=default_dimension(e.type),
                     name=e.name,
                     result=e.result,
                     reason=e.reason,
                     model=e.model,
                     engine=e.engine,
-                    details="",
                 )
             )
             run.log_error(str(e))
@@ -154,16 +283,23 @@ class DataContract:
                     result=ResultEnum.error,
                     name="Test Data Contract",
                     reason=str(e),
-                    engine="datacontract",
+                    engine="datacontract-cli",
                 )
             )
-            logging.exception("Exception occurred")
+            logger.exception("Exception occurred")
             run.log_error(str(e))
 
         run.finish()
 
         if self._publish_url is not None or self._publish_test_results:
-            publish_test_results_to_entropy_data(run, self._publish_url, self._ssl_verification)
+            if self._dry_run:
+                run.log_warn("Publishing skipped (--dry-run is set).")
+            elif run.result in (ResultEnum.skipped, ResultEnum.unknown):
+                run.log_warn("Publishing skipped (no checks were executed).")
+            else:
+                run.publish_succeeded = publish_test_results_to_entropy_data(
+                    run, self._publish_url, self._ssl_verification, config=self._config
+                )
 
         return run
 
@@ -173,7 +309,9 @@ class DataContract:
             data_contract_str=self._data_contract_str,
             data_contract=self._data_contract,
             schema_location=self._schema_location,
-            inline_definitions=self._inline_definitions,
+            inline_references=self._inline_references,
+            config=self._config,
+            configured_host_only=self._untrusted_contract,
         )
 
     def get_data_contract_file(self) -> str | None:
@@ -182,42 +320,23 @@ class DataContract:
     def export(
         self, export_format: ExportFormat, schema_name: str = "all", sql_server_type: str = "auto", **kwargs
     ) -> str | bytes:
-        if (
-            export_format == ExportFormat.html
-            or export_format == ExportFormat.mermaid
-            or export_format == ExportFormat.excel
-        ):
-            data_contract = resolve.resolve_data_contract(
-                self._data_contract_file,
-                self._data_contract_str,
-                self._data_contract,
-                schema_location=self._schema_location,
-                inline_definitions=self._inline_definitions,
-            )
+        data_contract = resolve.resolve_data_contract(
+            self._data_contract_file,
+            self._data_contract_str,
+            self._data_contract,
+            schema_location=self._schema_location,
+            inline_references=self._inline_references,
+            config=self._config,
+            configured_host_only=self._untrusted_contract,
+        )
 
-            return exporter_factory.create(export_format).export(
-                data_contract=data_contract,
-                schema_name=schema_name,
-                server=self._server,
-                sql_server_type=sql_server_type,
-                export_args=kwargs,
-            )
-        else:
-            data_contract = resolve.resolve_data_contract(
-                self._data_contract_file,
-                self._data_contract_str,
-                self._data_contract,
-                schema_location=self._schema_location,
-                inline_definitions=self._inline_definitions,
-            )
-
-            return exporter_factory.create(export_format).export(
-                data_contract=data_contract,
-                schema_name=schema_name,
-                server=self._server,
-                sql_server_type=sql_server_type,
-                export_args=kwargs,
-            )
+        return exporter_factory.create(export_format).export(
+            data_contract=data_contract,
+            schema_name=schema_name,
+            server=self._server,
+            sql_server_type=sql_server_type,
+            export_args=kwargs,
+        )
 
     def changelog(self, other: "DataContract") -> ChangelogResult:
         """Generate a changelog between this data contract and another, returning a ChangelogResult."""
@@ -251,21 +370,34 @@ class DataContract:
             )
         return result
 
+    def breaking(self, other: "DataContract", detector: BreakingChangeDetector | None = None) -> BreakingChangeResult:
+        """Classify the changelog between this contract and another for compatibility impact."""
+        changelog = self.changelog(other)
+        return (detector or BreakingChangeDetector()).detect(changelog)
+
     @classmethod
     def import_from_source(
         cls,
         format: str,
         source: typing.Optional[str] = None,
+        config: "Config | dict[str, str] | None" = None,
         **kwargs,
     ) -> OpenDataContractStandard:
         """Import a data contract from a source in a given format.
 
         All imports now return OpenDataContractStandard (ODCS) format.
+        Credentials and connection options can be passed via ``config``.
         """
         id = kwargs.get("id")
         owner = kwargs.get("owner")
 
-        odcs_imported = importer_factory.create(format).import_source(source=source, import_args=kwargs)
+        importer = importer_factory.create(format)
+        # Third-party importers registered before the config parameter existed may
+        # still implement the two-argument signature; only pass config where declared.
+        if "config" in inspect.signature(importer.import_source).parameters:
+            odcs_imported = importer.import_source(source=source, import_args=kwargs, config=Config.resolve(config))
+        else:
+            odcs_imported = importer.import_source(source=source, import_args=kwargs)
 
         cls._overwrite_id_in_odcs(odcs_imported, id)
         cls._overwrite_owner_in_odcs(odcs_imported, owner)

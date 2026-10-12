@@ -27,7 +27,7 @@ def test_import_sql_oracle():
     result = DataContract.import_from_source("sql", data_definition_file, dialect="oracle")
 
     expected = """
-apiVersion: v3.1.0
+apiVersion: v3.2.0
 kind: DataContract
 id: my-data-contract
 name: My Data Contract
@@ -51,6 +51,8 @@ schema:
         physicalType: INT
         primaryKey: true
         primaryKeyPosition: 1
+        required: true
+        unique: true
         description: Primary key
       - name: field_not_null
         logicalType: integer
@@ -98,11 +100,9 @@ schema:
         physicalType: TIMESTAMPLTZ
         description: Timestamp with fractional second precision of 6, with local timezone (LTZ)
       - name: field_interval_year
-        logicalType: object
         physicalType: INTERVAL YEAR TO MONTH
         description: Interval of time in years and months with default (2) precision
       - name: field_interval_day
-        logicalType: object
         physicalType: INTERVAL DAY TO SECOND
         description: Interval of time in days, hours, minutes and seconds with default (2 / 6) precision
       - name: field_raw
@@ -112,11 +112,9 @@ schema:
         physicalType: RAW
         description: Large raw binary data
       - name: field_rowid
-        logicalType: object
         physicalType: ROWID
         description: Base 64 string representing a unique row address
       - name: field_urowid
-        logicalType: object
         physicalType: UROWID
         description: Base 64 string representing the logical address
       - name: field_char
@@ -159,7 +157,7 @@ def test_import_sql_constraints():
     result = DataContract.import_from_source("sql", "fixtures/postgres/data/data_constraints.sql", dialect="postgres")
 
     expected = """
-apiVersion: v3.1.0
+apiVersion: v3.2.0
 kind: DataContract
 id: my-data-contract
 name: My Data Contract
@@ -171,7 +169,7 @@ servers:
     host: my_host
     port: 5432
     database: my_database
-    schema: public
+    schema: my_schema
 schema:
   - name: customer_location
     physicalType: table
@@ -181,7 +179,10 @@ schema:
       - name: id
         logicalType: number
         physicalType: DECIMAL
+        primaryKey: true
+        primaryKeyPosition: 1
         required: true
+        unique: true
       - name: created_by
         logicalType: string
         logicalTypeOptions:

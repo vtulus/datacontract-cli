@@ -6,7 +6,7 @@ version: 0.0.1
 domain: my-domain-team
 status: active
 schema:
-- name: my_table
+- name: my_logical_table
   physicalName: my_table
   logicalType: object
   physicalType: table
@@ -14,22 +14,16 @@ schema:
   - name: field_one
     logicalType: string
     physicalType: varchar
-    isNullable: false
-    isUnique: true
     logicalTypeOptions:
       pattern: '[A-Za-z]{2}-\d{3}-[A-Za-z]{2}$'
   - name: field_two
     logicalType: integer
     physicalType: integer
-    isNullable: true
-    isUnique: false
     logicalTypeOptions:
       minimum: 10
   - name: field_three
     logicalType: date
     physicalType: timestamp
-    isNullable: true
-    isUnique: false
 servers:
 - server: postgres
   type: postgres
@@ -41,4 +35,4 @@ slaProperties:
 - property: freshness
   value: 1
   unit: h
-  element: my_table.field_three
+  element: my_logical_table.field_three

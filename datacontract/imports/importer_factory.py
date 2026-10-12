@@ -82,6 +82,11 @@ importer_factory.register_lazy_importer(
     class_name="UnityImporter",
 )
 importer_factory.register_lazy_importer(
+    name=ImportFormat.databricks,
+    module_path="datacontract.imports.unity_importer",
+    class_name="UnityImporter",
+)
+importer_factory.register_lazy_importer(
     name=ImportFormat.spark,
     module_path="datacontract.imports.spark_importer",
     class_name="SparkImporter",
@@ -115,14 +120,95 @@ importer_factory.register_lazy_importer(
     class_name="ProtoBufImporter",
 )
 importer_factory.register_lazy_importer(
+    name=ImportFormat.pydantic_model,
+    module_path="datacontract.imports.pydantic_importer",
+    class_name="PydanticImporter",
+)
+importer_factory.register_lazy_importer(
     name=ImportFormat.excel,
     module_path="datacontract.imports.excel_importer",
     class_name="ExcelImporter",
 )
-
-
+importer_factory.register_lazy_importer(
+    name=ImportFormat.powerbi,
+    module_path="datacontract.imports.powerbi_importer",
+    class_name="PowerBiImporter",
+)
+importer_factory.register_lazy_importer(
+    name=ImportFormat.snowflake,
+    module_path="datacontract.imports.snowflake_importer",
+    class_name="SnowflakeImporter",
+)
+importer_factory.register_lazy_importer(
+    name=ImportFormat.redshift,
+    module_path="datacontract.imports.redshift_importer",
+    class_name="RedshiftImporter",
+)
+importer_factory.register_lazy_importer(
+    name=ImportFormat.postgres,
+    module_path="datacontract.imports.postgres_importer",
+    class_name="PostgresImporter",
+)
+importer_factory.register_lazy_importer(
+    name=ImportFormat.athena,
+    module_path="datacontract.imports.athena_importer",
+    class_name="AthenaImporter",
+)
+importer_factory.register_lazy_importer(
+    name=ImportFormat.trino,
+    module_path="datacontract.imports.trino_importer",
+    class_name="TrinoImporter",
+)
+importer_factory.register_lazy_importer(
+    name=ImportFormat.clickhouse,
+    module_path="datacontract.imports.clickhouse_importer",
+    class_name="ClickHouseImporter",
+)
+importer_factory.register_lazy_importer(
+    name=ImportFormat.hive,
+    module_path="datacontract.imports.hive_importer",
+    class_name="HiveImporter",
+)
+importer_factory.register_lazy_importer(
+    name=ImportFormat.oracle,
+    module_path="datacontract.imports.oracle_importer",
+    class_name="OracleImporter",
+)
+importer_factory.register_lazy_importer(
+    name=ImportFormat.sqlserver,
+    module_path="datacontract.imports.sqlserver_importer",
+    class_name="SqlServerImporter",
+)
+importer_factory.register_lazy_importer(
+    name=ImportFormat.mysql,
+    module_path="datacontract.imports.mysql_importer",
+    class_name="MysqlImporter",
+)
+# one importer, registered once per object storage; it reads the server type
+# from the format it was registered under
+for _storage in (ImportFormat.s3, ImportFormat.gcs, ImportFormat.adls):
+    importer_factory.register_lazy_importer(
+        name=_storage,
+        module_path="datacontract.imports.object_storage_importer",
+        class_name="ObjectStorageImporter",
+    )
 importer_factory.register_lazy_importer(
     name=ImportFormat.json,
     module_path="datacontract.imports.json_importer",
     class_name="JsonImporter",
+)
+importer_factory.register_lazy_importer(
+    name=ImportFormat.odata,
+    module_path="datacontract.imports.odata_importer",
+    class_name="ODataImporter",
+)
+importer_factory.register_lazy_importer(
+    name=ImportFormat.openapi,
+    module_path="datacontract.imports.openapi_importer",
+    class_name="OpenApiImporter",
+)
+importer_factory.register_lazy_importer(
+    name=ImportFormat.xsd,
+    module_path="datacontract.imports.xsd_importer",
+    class_name="XsdImporter",
 )

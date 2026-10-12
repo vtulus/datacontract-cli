@@ -8,9 +8,7 @@ from datacontract.export.exporter import Exporter, _determine_sql_server_type
 
 
 class SQLAlchemyExporter(Exporter):
-    def export(
-        self, data_contract: OpenDataContractStandard, schema_name, server, sql_server_type, export_args
-    ) -> dict:
+    def export(self, data_contract: OpenDataContractStandard, schema_name, server, sql_server_type, export_args) -> str:
         sql_server_type = _determine_sql_server_type(data_contract, sql_server_type, server)
         return to_sqlalchemy_model_str(data_contract, sql_server_type, server)
 
@@ -85,6 +83,7 @@ def to_sqlalchemy_model_str(odcs: OpenDataContractStandard, sql_server_type: str
                     ast.alias("Boolean"),
                     ast.alias("Date"),
                     ast.alias("ARRAY"),
+                    ast.alias("JSON"),
                     ast.alias("LargeBinary"),
                 ],
             ),
@@ -153,6 +152,10 @@ def constant_field_value(field_name: str, prop: SchemaProperty) -> tuple[ast.Cal
             new_type = Call("ARRAY", sqlalchemy_primitive(prop.items))
         else:
             new_type = Call("ARRAY", ast.Name("String"))
+    elif prop_type and prop_type.lower() == "map":
+        new_type = ast.Name("JSON")
+    elif prop_type and prop_type.lower() == "vector":
+        new_type = Call("ARRAY", ast.Name("Float"))
 
     if new_type is None:
         raise RuntimeError(f"Unsupported field type {prop_type}.")

@@ -6,7 +6,19 @@ import typer
 from rich.console import Console
 from typing_extensions import Annotated
 
-from datacontract.cli import _print_logs, app, console, debug_option, enable_debug_logging
+from datacontract.cli import (
+    _print_logs,
+    _print_publish_failure,
+    app,
+    config_with_custom_quality_checks,
+    console,
+    custom_quality_checks_option,
+    debug_option,
+    enable_debug_logging,
+    inline_references_option,
+    resolve_output_format,
+    validate_publish_url,
+)
 from datacontract.data_contract import DataContract
 from datacontract.output.ci_output import write_ci_output, write_ci_summary, write_json_results
 from datacontract.output.output_format import OutputFormat
@@ -26,7 +38,7 @@ class FailOn(str, Enum):
 def ci(
     locations: Annotated[
         Optional[list[str]],
-        typer.Argument(help="The location(s) (url or path) of the data contract yaml file(s)."),
+        typer.Argument(help="The location(s) (url, s3 url, or local path) of the data contract yaml file(s)."),
     ] = None,
     schema: Annotated[
         str,
@@ -48,7 +60,17 @@ def ci(
             help="Specify the file path where the test results should be written to (e.g., './test-results/TEST-datacontract.xml')."
         ),
     ] = None,
-    output_format: Annotated[OutputFormat, typer.Option(help="The target format for the test results.")] = None,
+    output_format: Annotated[
+        OutputFormat,
+        typer.Option(help="The target format for the test results. Accepted values: json, junit."),
+    ] = None,
+    metadata_only: Annotated[
+        bool,
+        typer.Option(
+            help="Run only checks that read the schema (field presence and types). "
+            "Checks that read row values are skipped."
+        ),
+    ] = False,
     logs: Annotated[bool, typer.Option(help="Print logs")] = False,
     json_output: Annotated[bool, typer.Option("--json", help="Print test results as JSON to stdout.")] = False,
     fail_on: Annotated[
@@ -59,12 +81,15 @@ def ci(
         bool,
         typer.Option(help="SSL verification when publishing the data contract."),
     ] = True,
+    custom_quality_checks: custom_quality_checks_option = None,
+    inline_references: inline_references_option = True,
     debug: debug_option = None,
 ):
     """
     Run tests for CI/CD pipelines. Emits GitHub Actions annotations and step summary.
     """
-    enable_debug_logging(debug)
+    enable_debug_logging(debug, otherwise_disable_stderr=True)
+    publish = validate_publish_url(publish)
 
     if not locations:
         locations = ["datacontract.yaml"]
@@ -76,9 +101,12 @@ def ci(
     if server == "all":
         server = None
 
+    output_format = resolve_output_format(output_format, output)
+
     # Plain text output for CI logs; --json sends human output to stderr.
     out = Console(stderr=True, no_color=True) if json_output else Console(no_color=True)
 
+    config = config_with_custom_quality_checks(custom_quality_checks)
     results = []
     fail_results = {
         "warning": {"warning", "failed", "error"},
@@ -90,11 +118,14 @@ def ci(
     for location in locations:
         out.print(f"Testing {location}")
         run = DataContract(
+            config=config,
             data_contract_file=location,
             schema_location=schema,
             publish_url=publish,
             server=server,
             ssl_verification=ssl_verification,
+            inline_references=inline_references,
+            metadata_only=metadata_only,
         ).test()
         if logs:
             _print_logs(run, out)
@@ -104,6 +135,10 @@ def ci(
             write_test_result(run, out, output_format, output)
         except typer.Exit:
             pass
+        if run.publish_succeeded is False:
+            # A publish that was asked for and failed is a failed run, regardless of --fail-on.
+            _print_publish_failure(run, out)
+            should_fail = True
         if run.result in fail_results[fail_on]:
             should_fail = True
 

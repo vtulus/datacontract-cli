@@ -2,11 +2,12 @@ import json
 import os
 import sys
 
+from open_data_contract_standard.model import SchemaObject, SchemaProperty
 from typer.testing import CliRunner
 
 from datacontract.cli import app
 from datacontract.data_contract import DataContract
-from datacontract.export.jsonschema_exporter import to_jsonschemas
+from datacontract.export.jsonschema_exporter import to_jsonschema, to_jsonschemas
 from datacontract.lint.resolve import resolve_data_contract
 
 # logging.basicConfig(level=logging.DEBUG, force=True)
@@ -20,7 +21,7 @@ def test_cli():
 
 def test_to_jsonschemas():
     data_contract = DataContract(
-        data_contract_file="fixtures/local-json/datacontract.yaml", inline_definitions=True
+        data_contract_file="fixtures/local-json/datacontract.yaml", inline_references=True
     ).get_data_contract()
 
     with open("fixtures/local-json/datacontract.json") as file:
@@ -175,6 +176,23 @@ def test_to_jsonschemas_complex_2():
     assert result["sts_data"] == json.loads(expected_json_schema)
 
 
+def test_to_jsonschema_uses_physical_name():
+    schema = SchemaObject(
+        name="equipment",
+        properties=[
+            SchemaProperty(name="Equipment Name", physicalName="name", logicalType="string", required=True),
+            SchemaProperty(name="location", logicalType="string", required=False),
+        ],
+    )
+
+    result = to_jsonschema("equipment", schema)
+
+    # physicalName wins over the logical name; falls back to name when unset
+    assert set(result["properties"].keys()) == {"name", "location"}
+    assert result["properties"]["name"]["type"] == "string"
+    assert result["required"] == ["name"]
+
+
 def read_file(data_contract_file):
     if not os.path.exists(data_contract_file):
         print(f"The file '{data_contract_file}' does not exist.")
@@ -182,3 +200,29 @@ def read_file(data_contract_file):
     with open(data_contract_file, "r") as file:
         file_content = file.read()
     return file_content
+
+
+def test_an_infinite_bound_is_not_exported():
+    contract = DataContract(
+        data_contract_str="""
+apiVersion: v3.2.0
+kind: DataContract
+id: inf
+version: 1.0.0
+status: active
+schema:
+  - name: measure
+    properties:
+      - name: n
+        logicalType: number
+        logicalTypeOptions:
+          minimum: 0
+          maximum: .inf
+"""
+    ).get_data_contract()
+
+    exported = to_jsonschema("measure", contract.schema_[0])
+
+    # JSON has no infinite numbers, and an infinite bound bounds nothing
+    assert exported["properties"]["n"]["minimum"] == 0
+    assert "maximum" not in exported["properties"]["n"]

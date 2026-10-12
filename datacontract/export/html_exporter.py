@@ -10,9 +10,11 @@ from open_data_contract_standard.model import OpenDataContractStandard
 from datacontract.export.exporter import Exporter
 from datacontract.export.mermaid_exporter import to_mermaid
 
+logger = logging.getLogger(__name__)
+
 
 class HtmlExporter(Exporter):
-    def export(self, data_contract, schema_name, server, sql_server_type, export_args) -> dict:
+    def export(self, data_contract, schema_name, server, sql_server_type, export_args) -> str:
         return to_html(data_contract)
 
 
@@ -22,12 +24,14 @@ def to_html(data_contract: OpenDataContractStandard) -> str:
     env = Environment(
         loader=package_loader,
         autoescape=select_autoescape(
-            enabled_extensions="html",
+            enabled_extensions=("html", "htm", "xml"),
             default_for_string=True,
         ),
     )
-    # Set up for partials
-    jinja_partials.register_environment(env)
+    # Set up for partials. markup=True wraps each rendered partial in Markup so
+    # autoescape does not re-escape the partial's own HTML; the field values
+    # inside the partial are still escaped when the partial itself renders.
+    jinja_partials.register_environment(env, markup=True)
 
     # Load the ODCS template
     template_file = "datacontract_odcs.html"
@@ -64,5 +68,5 @@ def get_version() -> str:
     try:
         return version("datacontract_cli")
     except Exception as e:
-        logging.debug("Ignoring exception", e)
+        logger.debug("Ignoring exception: %s", e)
         return ""

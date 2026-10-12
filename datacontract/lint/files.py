@@ -1,6 +1,7 @@
 import os
 
 from datacontract.model.exceptions import DataContractException
+from datacontract.model.run import ResultEnum
 
 
 def read_file(path):
@@ -9,9 +10,9 @@ def read_file(path):
             type="lint",
             name=f"Reading data contract from {path}",
             reason=f"The file '{path}' does not exist.",
-            engine="datacontract",
-            result="error",
+            engine="datacontract-cli",
+            result=ResultEnum.error,
         )
-    with open(path, "r") as file:
+    with open(path, "r", encoding="utf-8") as file:
         file_content = file.read()
     return file_content

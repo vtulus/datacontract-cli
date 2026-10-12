@@ -2,7 +2,13 @@ import os
 import sys
 
 import yaml
-from open_data_contract_standard.model import OpenDataContractStandard, SchemaObject, SchemaProperty
+from open_data_contract_standard.model import (
+    CustomProperty,
+    OpenDataContractStandard,
+    SchemaObject,
+    SchemaProperty,
+    Server,
+)
 from typer.testing import CliRunner
 
 from datacontract.cli import app
@@ -33,9 +39,10 @@ models:
     description: The orders model
     data_tests:
       - dbt_utils.unique_combination_of_columns:
-          combination_of_columns:
-            - order_id
-            - order_status
+          arguments:
+            combination_of_columns:
+              - order_id
+              - order_status
     columns:
       - name: order_id
         data_type: VARCHAR
@@ -44,14 +51,17 @@ models:
           - type: unique
         data_tests:
           - dbt_expectations.expect_column_value_lengths_to_be_between:
-              min_value: 8
-              max_value: 10
+              arguments:
+                min_value: 8
+                max_value: 10
           - dbt_expectations.expect_column_values_to_match_regex:
-              regex: ^B[0-9]+$
-        meta:
-          classification: sensitive
-        tags:
-          - order_id
+              arguments:
+                regex: ^B[0-9]+$
+        config:
+          meta:
+            classification: sensitive
+          tags:
+            - order_id
       - name: order_total
         data_type: NUMBER
         constraints:
@@ -59,18 +69,20 @@ models:
         description: The order_total field
         data_tests:
           - dbt_expectations.expect_column_values_to_be_between:
-               min_value: 0
-               max_value: 1000000
+              arguments:
+                min_value: 0
+                max_value: 1000000
       - name: order_status
         data_type: TEXT
         constraints:
           - type: not_null
         data_tests:
           - accepted_values:
-              values:
-                - 'pending'
-                - 'shipped'
-                - 'delivered'
+              arguments:
+                values:
+                  - 'pending'
+                  - 'shipped'
+                  - 'delivered'
 """
 
     result = yaml.safe_load(to_dbt_models_yaml(data_contract))
@@ -94,9 +106,10 @@ models:
     description: The orders model
     data_tests:
       - dbt_utils.unique_combination_of_columns:
-          combination_of_columns:
-            - order_id
-            - order_status
+          arguments:
+            combination_of_columns:
+              - order_id
+              - order_status
     columns:
       - name: order_id
         data_type: STRING
@@ -105,14 +118,17 @@ models:
           - type: unique
         data_tests:
           - dbt_expectations.expect_column_value_lengths_to_be_between:
-              min_value: 8
-              max_value: 10
+              arguments:
+                min_value: 8
+                max_value: 10
           - dbt_expectations.expect_column_values_to_match_regex:
-              regex: ^B[0-9]+$
-        meta:
-          classification: sensitive
-        tags:
-          - order_id
+              arguments:
+                regex: ^B[0-9]+$
+        config:
+          meta:
+            classification: sensitive
+          tags:
+            - order_id
       - name: order_total
         data_type: INT64
         constraints:
@@ -120,18 +136,20 @@ models:
         description: The order_total field
         data_tests:
           - dbt_expectations.expect_column_values_to_be_between:
-               min_value: 0
-               max_value: 1000000
+              arguments:
+                min_value: 0
+                max_value: 1000000
       - name: order_status
         data_type: STRING
         constraints:
           - type: not_null
         data_tests:
           - accepted_values:
-              values:
-                - 'pending'
-                - 'shipped'
-                - 'delivered'
+              arguments:
+                values:
+                  - 'pending'
+                  - 'shipped'
+                  - 'delivered'
 """
 
     result = yaml.safe_load(to_dbt_models_yaml(odcs, server="bigquery"))
@@ -175,9 +193,10 @@ models:
         enforced: true
     data_tests:
       - dbt_utils.unique_combination_of_columns:
-          combination_of_columns:
-            - order_id
-            - user_id
+          arguments:
+            combination_of_columns:
+              - order_id
+              - user_id
     columns:
       - name: order_id
         data_type: STRING
@@ -253,6 +272,40 @@ models:
     assert result == expected
 
 
+def test_to_dbt_models_writes_meta_custom_property_to_column_meta():
+    data_contract = OpenDataContractStandard(
+        apiVersion="v3.1.0",
+        kind="DataContract",
+        id="hr",
+        schema=[
+            SchemaObject(
+                name="fact_workers",
+                properties=[
+                    SchemaProperty(
+                        name="employee_id",
+                        logicalType="string",
+                        classification="restricted",
+                        customProperties=[
+                            CustomProperty(property="meta", value={"classification": "C2", "is_pii": True})
+                        ],
+                    ),
+                    SchemaProperty(
+                        name="department_id",
+                        logicalType="string",
+                        customProperties=[CustomProperty(property="meta", value="not a mapping")],
+                    ),
+                ],
+            )
+        ],
+    )
+
+    columns = yaml.safe_load(to_dbt_models_yaml(data_contract))["models"][0]["columns"]
+
+    assert columns[0]["config"]["meta"] == {"is_pii": True, "classification": "restricted"}
+    assert "meta" not in columns[0]
+    assert "config" not in columns[1]
+
+
 def read_file(file):
     if not os.path.exists(file):
         print(f"The file '{file}' does not exist.")
@@ -260,3 +313,28 @@ def read_file(file):
     with open(file, "r") as file:
         file_content = file.read()
     return file_content
+
+
+def test_to_dbt_models_resolves_dialect_from_server_type():
+    """`--server` names a declared server; its `type` (not its literal name) is the mapping dialect."""
+    data_contract = OpenDataContractStandard(
+        apiVersion="v3.0.0",
+        kind="DataContract",
+        id="exp",
+        servers=[Server(server="prod_wh", type="snowflake")],
+        schema=[SchemaObject(name="orders", properties=[SchemaProperty(name="amount", physicalType="bigint")])],
+    )
+    col = yaml.safe_load(to_dbt_models_yaml(data_contract, server="prod_wh"))["models"][0]["columns"][0]
+    assert col["data_type"] == "NUMBER"  # snowflake mapping of bigint, resolved from server.type
+
+
+def test_to_dbt_models_server_falls_back_to_literal_dialect():
+    """A `--server` value that matches no declared server is used as a bare dialect (backward-compat)."""
+    data_contract = OpenDataContractStandard(
+        apiVersion="v3.0.0",
+        kind="DataContract",
+        id="exp",
+        schema=[SchemaObject(name="orders", properties=[SchemaProperty(name="amount", physicalType="bigint")])],
+    )
+    col = yaml.safe_load(to_dbt_models_yaml(data_contract, server="snowflake"))["models"][0]["columns"][0]
+    assert col["data_type"] == "NUMBER"

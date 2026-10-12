@@ -1,4 +1,4 @@
-from datacontract.engines.soda.connections.duckdb_connection import get_duckdb_connection
+from datacontract.engines.ibis.connections.duckdb_connection import get_duckdb_connection
 from datacontract.lint import resolve
 from datacontract.model.run import Run
 
@@ -52,7 +52,9 @@ schema:
     con = get_duckdb_connection(data_contract, server, run)
     tbl = con.table("sample_data")
     assert tbl.columns == ["id", "tags", "name"]
-    assert [x[1].lower() for x in tbl.description] == ["number", "list", "dict"]
+    # duckdb >=1.5 returns DuckDBPyType objects in `description`; assert on the
+    # stable type id (number->bigint, list->list, dict->struct).
+    assert [x[1].id for x in tbl.description] == ["bigint", "list", "struct"]
     # test that duckdb correct unpacked the nested structures.
     assert tbl.fetchone() == (
         1,
@@ -64,18 +66,18 @@ schema:
     ## check nested tables
     tbl = con.table("sample_data__tags")
     assert tbl.columns == ["foo", "arr"]
-    assert [x[1].lower() for x in tbl.description] == ["string", "list"]
+    assert [x[1].id for x in tbl.description] == ["varchar", "list"]
     assert tbl.fetchone() == ("bar", [1, 2, 3])
     assert tbl.fetchone() == ("lap", [4])
     assert tbl.fetchone() == ("zap", [])
     assert tbl.fetchone() is None
     tbl = con.table("sample_data__tags__arr")
     assert tbl.columns == ["arr"]
-    assert [x[1].lower() for x in tbl.description] == ["number"]
+    assert [x[1].id for x in tbl.description] == ["bigint"]
     assert tbl.fetchall() == [(1,), (2,), (3,), (4,)]
     tbl = con.table("sample_data__name")
     assert tbl.columns == ["first", "last"]
-    assert [x[1].lower() for x in tbl.description] == ["string", "string"]
+    assert [x[1].id for x in tbl.description] == ["varchar", "varchar"]
     assert tbl.fetchall() == [("John", "Doe")]
 
 
@@ -143,3 +145,51 @@ schema:
     assert "sample_data" in table_names
     assert "sample_data__metadata" not in table_names
     assert "sample_data__settings" not in table_names
+
+
+def test_physical_name_columns():
+    """Columns come from physicalName when it is set, so the checks find them."""
+    data_contract_str = """
+kind: DataContract
+apiVersion: v3.1.0
+id: "61111-0003"
+name: Sample data with physical names
+version: 1.0.0
+status: active
+servers:
+  - server: sample
+    type: local
+    path: ./fixtures/local-json/data/nested_types.json
+    format: json
+    delimiter: array
+schema:
+  - name: sample_data
+    physicalType: object
+    properties:
+      - name: Identifier
+        physicalName: id
+        logicalType: integer
+      - name: Tag List
+        physicalName: tags
+        logicalType: array
+        items:
+          logicalType: object
+          properties:
+            - name: Foo Value
+              physicalName: foo
+              logicalType: string
+      - name: Full Name
+        physicalName: name
+        logicalType: object
+        properties:
+          - name: First Name
+            physicalName: first
+            logicalType: string
+    """
+    data_contract = resolve.resolve_data_contract(data_contract_str=data_contract_str)
+    server = next(s for s in data_contract.servers if s.server == "sample")
+    con = get_duckdb_connection(data_contract, server, Run.create_run())
+    assert con.table("sample_data").columns == ["id", "tags", "name"]
+    # nested struct fields and the nested views are keyed on the physical name too
+    assert con.table("sample_data__tags").columns == ["foo"]
+    assert con.table("sample_data__name").columns == ["first"]

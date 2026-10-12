@@ -5,10 +5,17 @@ import typer
 from rich.console import Console
 from typing_extensions import Annotated
 
-from datacontract.cli import OrderedCommandsWithMigrationHints, debug_option, enable_debug_logging
+from datacontract.cli import (
+    OrderedCommandsWithMigrationHints,
+    _parse_enum_csv,
+    debug_option,
+    enable_debug_logging,
+    inline_references_option,
+)
+from datacontract.config import cli_config
 from datacontract.data_contract import DataContract
 from datacontract.export.exporter import ExportFormat, SqlServerType
-from datacontract.export.great_expectations_exporter import GreatExpectationsEngine
+from datacontract.export.great_expectations_exporter import GreatExpectationsCheckCategory, GreatExpectationsEngine
 
 console = Console()
 
@@ -17,7 +24,10 @@ export_app = typer.Typer(cls=OrderedCommandsWithMigrationHints, no_args_is_help=
 # ---------------------------------------------------------------------------
 # Shared option type aliases
 # ---------------------------------------------------------------------------
-location_arg = Annotated[str, typer.Argument(help="The location (url or path) of the data contract yaml.")]
+location_arg = Annotated[
+    str,
+    typer.Argument(help="The location (url, s3 url, or local path) of the data contract yaml."),
+]
 output_option = Annotated[
     Optional[Path],
     typer.Option(
@@ -52,8 +62,19 @@ def _export(
     rdf_base: Optional[str] = None,
     engine: Optional[str] = None,
     template: Optional[Path | str] = None,
+    inline_references: bool = True,
+    clickhouse_engine: Optional[str] = None,
+    clickhouse_order_by: Optional[str] = None,
+    suite_name: Optional[str] = None,
+    check_categories: Optional[set[str]] = None,
 ):
-    result = DataContract(data_contract_file=location, schema_location=schema, server=server).export(
+    result = DataContract(
+        config=cli_config(),
+        data_contract_file=location,
+        schema_location=schema,
+        server=server,
+        inline_references=inline_references,
+    ).export(
         export_format=export_format,
         schema_name=schema_name,
         server=server,
@@ -61,6 +82,10 @@ def _export(
         sql_server_type=sql_server_type,
         engine=engine,
         template=template,
+        clickhouse_engine=clickhouse_engine,
+        clickhouse_order_by=clickhouse_order_by,
+        suite_name=suite_name,
+        check_categories=check_categories,
     )
     if output is None:
         console.print(result, markup=False, soft_wrap=True)
@@ -79,6 +104,24 @@ def _export(
 # ---------------------------------------------------------------------------
 
 
+clickhouse_engine_option = Annotated[
+    Optional[str],
+    typer.Option(
+        help="The ClickHouse table engine. Default: MergeTree(). "
+        "Example: ReplicatedMergeTree('/clickhouse/tables/{shard}/table', '{replica}')"
+    ),
+]
+clickhouse_order_by_option = Annotated[
+    Optional[str],
+    typer.Option(
+        help="ORDER BY columns for ClickHouse (comma-separated). "
+        "ClickHouse uses ORDER BY as its primary/sorting key (not PRIMARY KEY). "
+        "Default: primary key columns if defined, omitted otherwise. "
+        'Example: --clickhouse-order-by "event_date DESC, event_id"'
+    ),
+]
+
+
 @export_app.command(
     name="sql",
     epilog="Example: datacontract export sql datacontract.yaml --dialect postgres --output ddl.sql",
@@ -90,11 +133,25 @@ def export_sql(
     server: server_option = None,
     schema_name: schema_name_option = "all",
     schema: schema_option = None,
+    inline_references: inline_references_option = True,
+    clickhouse_engine: clickhouse_engine_option = None,
+    clickhouse_order_by: clickhouse_order_by_option = None,
     debug: debug_option = None,
 ):
     """Export a data contract to SQL DDL."""
     enable_debug_logging(debug)
-    _export(ExportFormat.sql, location, output, server, schema_name, schema, sql_server_type=dialect.value)
+    _export(
+        ExportFormat.sql,
+        location,
+        output,
+        server,
+        schema_name,
+        schema,
+        sql_server_type=dialect.value,
+        inline_references=inline_references,
+        clickhouse_engine=clickhouse_engine,
+        clickhouse_order_by=clickhouse_order_by,
+    )
 
 
 @export_app.command(
@@ -108,11 +165,21 @@ def export_sql_query(
     server: server_option = None,
     schema_name: schema_name_option = "all",
     schema: schema_option = None,
+    inline_references: inline_references_option = True,
     debug: debug_option = None,
 ):
     """Export a data contract to a SQL query."""
     enable_debug_logging(debug)
-    _export(ExportFormat.sql_query, location, output, server, schema_name, schema, sql_server_type=dialect.value)
+    _export(
+        ExportFormat.sql_query,
+        location,
+        output,
+        server,
+        schema_name,
+        schema,
+        sql_server_type=dialect.value,
+        inline_references=inline_references,
+    )
 
 
 @export_app.command(
@@ -125,11 +192,12 @@ def export_dbt_models(
     server: server_option = None,
     schema_name: schema_name_option = "all",
     schema: schema_option = None,
+    inline_references: inline_references_option = True,
     debug: debug_option = None,
 ):
     """Export a data contract to dbt model schema YAML."""
     enable_debug_logging(debug)
-    _export(ExportFormat.dbt_models, location, output, server, schema_name, schema)
+    _export(ExportFormat.dbt_models, location, output, server, schema_name, schema, inline_references=inline_references)
 
 
 @export_app.command(
@@ -154,11 +222,14 @@ def export_dbt_sources(
     server: server_option = None,
     schema_name: schema_name_option = "all",
     schema: schema_option = None,
+    inline_references: inline_references_option = True,
     debug: debug_option = None,
 ):
     """Export a data contract to dbt sources YAML."""
     enable_debug_logging(debug)
-    _export(ExportFormat.dbt_sources, location, output, server, schema_name, schema)
+    _export(
+        ExportFormat.dbt_sources, location, output, server, schema_name, schema, inline_references=inline_references
+    )
 
 
 @export_app.command(
@@ -171,11 +242,14 @@ def export_dbt_staging_sql(
     server: server_option = None,
     schema_name: schema_name_option = "all",
     schema: schema_option = None,
+    inline_references: inline_references_option = True,
     debug: debug_option = None,
 ):
     """Export a data contract to a dbt staging SQL file."""
     enable_debug_logging(debug)
-    _export(ExportFormat.dbt_staging_sql, location, output, server, schema_name, schema)
+    _export(
+        ExportFormat.dbt_staging_sql, location, output, server, schema_name, schema, inline_references=inline_references
+    )
 
 
 @export_app.command(
@@ -188,11 +262,12 @@ def export_avro(
     server: server_option = None,
     schema_name: schema_name_option = "all",
     schema: schema_option = None,
+    inline_references: inline_references_option = True,
     debug: debug_option = None,
 ):
     """Export a data contract to Avro schema."""
     enable_debug_logging(debug)
-    _export(ExportFormat.avro, location, output, server, schema_name, schema)
+    _export(ExportFormat.avro, location, output, server, schema_name, schema, inline_references=inline_references)
 
 
 @export_app.command(
@@ -205,11 +280,12 @@ def export_avro_idl(
     server: server_option = None,
     schema_name: schema_name_option = "all",
     schema: schema_option = None,
+    inline_references: inline_references_option = True,
     debug: debug_option = None,
 ):
     """Export a data contract to Avro IDL."""
     enable_debug_logging(debug)
-    _export(ExportFormat.avro_idl, location, output, server, schema_name, schema)
+    _export(ExportFormat.avro_idl, location, output, server, schema_name, schema, inline_references=inline_references)
 
 
 @export_app.command(
@@ -222,11 +298,30 @@ def export_jsonschema(
     server: server_option = None,
     schema_name: schema_name_option = "all",
     schema: schema_option = None,
+    inline_references: inline_references_option = True,
     debug: debug_option = None,
 ):
     """Export a data contract to JSON Schema."""
     enable_debug_logging(debug)
-    _export(ExportFormat.jsonschema, location, output, server, schema_name, schema)
+    _export(ExportFormat.jsonschema, location, output, server, schema_name, schema, inline_references=inline_references)
+
+
+@export_app.command(
+    name="xsd",
+    epilog="Example: datacontract export xsd datacontract.yaml --output schema.xsd",
+)
+def export_xsd(
+    location: location_arg = "datacontract.yaml",
+    output: output_option = None,
+    server: server_option = None,
+    schema_name: schema_name_option = "all",
+    schema: schema_option = None,
+    inline_references: inline_references_option = True,
+    debug: debug_option = None,
+):
+    """Export a data contract to an XML Schema (XSD)."""
+    enable_debug_logging(debug)
+    _export(ExportFormat.xsd, location, output, server, schema_name, schema, inline_references=inline_references)
 
 
 @export_app.command(
@@ -239,11 +334,14 @@ def export_pydantic_model(
     server: server_option = None,
     schema_name: schema_name_option = "all",
     schema: schema_option = None,
+    inline_references: inline_references_option = True,
     debug: debug_option = None,
 ):
     """Export a data contract to a Pydantic model."""
     enable_debug_logging(debug)
-    _export(ExportFormat.pydantic_model, location, output, server, schema_name, schema)
+    _export(
+        ExportFormat.pydantic_model, location, output, server, schema_name, schema, inline_references=inline_references
+    )
 
 
 @export_app.command(
@@ -256,11 +354,12 @@ def export_protobuf(
     server: server_option = None,
     schema_name: schema_name_option = "all",
     schema: schema_option = None,
+    inline_references: inline_references_option = True,
     debug: debug_option = None,
 ):
     """Export a data contract to Protobuf schema."""
     enable_debug_logging(debug)
-    _export(ExportFormat.protobuf, location, output, server, schema_name, schema)
+    _export(ExportFormat.protobuf, location, output, server, schema_name, schema, inline_references=inline_references)
 
 
 @export_app.command(
@@ -273,11 +372,12 @@ def export_odcs(
     server: server_option = None,
     schema_name: schema_name_option = "all",
     schema: schema_option = None,
+    inline_references: inline_references_option = True,
     debug: debug_option = None,
 ):
     """Export a data contract to ODCS format."""
     enable_debug_logging(debug)
-    _export(ExportFormat.odcs, location, output, server, schema_name, schema)
+    _export(ExportFormat.odcs, location, output, server, schema_name, schema, inline_references=inline_references)
 
 
 @export_app.command(
@@ -294,11 +394,21 @@ def export_rdf(
     server: server_option = None,
     schema_name: schema_name_option = "all",
     schema: schema_option = None,
+    inline_references: inline_references_option = True,
     debug: debug_option = None,
 ):
     """Export a data contract to RDF."""
     enable_debug_logging(debug)
-    _export(ExportFormat.rdf, location, output, server, schema_name, schema, rdf_base=base)
+    _export(
+        ExportFormat.rdf,
+        location,
+        output,
+        server,
+        schema_name,
+        schema,
+        rdf_base=base,
+        inline_references=inline_references,
+    )
 
 
 @export_app.command(
@@ -311,11 +421,12 @@ def export_html(
     server: server_option = None,
     schema_name: schema_name_option = "all",
     schema: schema_option = None,
+    inline_references: inline_references_option = True,
     debug: debug_option = None,
 ):
     """Export a data contract to HTML."""
     enable_debug_logging(debug)
-    _export(ExportFormat.html, location, output, server, schema_name, schema)
+    _export(ExportFormat.html, location, output, server, schema_name, schema, inline_references=inline_references)
 
 
 @export_app.command(
@@ -328,11 +439,12 @@ def export_markdown(
     server: server_option = None,
     schema_name: schema_name_option = "all",
     schema: schema_option = None,
+    inline_references: inline_references_option = True,
     debug: debug_option = None,
 ):
     """Export a data contract to Markdown."""
     enable_debug_logging(debug)
-    _export(ExportFormat.markdown, location, output, server, schema_name, schema)
+    _export(ExportFormat.markdown, location, output, server, schema_name, schema, inline_references=inline_references)
 
 
 @export_app.command(
@@ -345,11 +457,12 @@ def export_mermaid(
     server: server_option = None,
     schema_name: schema_name_option = "all",
     schema: schema_option = None,
+    inline_references: inline_references_option = True,
     debug: debug_option = None,
 ):
     """Export a data contract to Mermaid diagram."""
     enable_debug_logging(debug)
-    _export(ExportFormat.mermaid, location, output, server, schema_name, schema)
+    _export(ExportFormat.mermaid, location, output, server, schema_name, schema, inline_references=inline_references)
 
 
 @export_app.command(
@@ -362,11 +475,12 @@ def export_bigquery(
     server: server_option = None,
     schema_name: schema_name_option = "all",
     schema: schema_option = None,
+    inline_references: inline_references_option = True,
     debug: debug_option = None,
 ):
     """Export a data contract to BigQuery schema."""
     enable_debug_logging(debug)
-    _export(ExportFormat.bigquery, location, output, server, schema_name, schema)
+    _export(ExportFormat.bigquery, location, output, server, schema_name, schema, inline_references=inline_references)
 
 
 @export_app.command(
@@ -379,11 +493,12 @@ def export_dbml(
     server: server_option = None,
     schema_name: schema_name_option = "all",
     schema: schema_option = None,
+    inline_references: inline_references_option = True,
     debug: debug_option = None,
 ):
     """Export a data contract to DBML."""
     enable_debug_logging(debug)
-    _export(ExportFormat.dbml, location, output, server, schema_name, schema)
+    _export(ExportFormat.dbml, location, output, server, schema_name, schema, inline_references=inline_references)
 
 
 @export_app.command(
@@ -396,11 +511,12 @@ def export_go(
     server: server_option = None,
     schema_name: schema_name_option = "all",
     schema: schema_option = None,
+    inline_references: inline_references_option = True,
     debug: debug_option = None,
 ):
     """Export a data contract to Go structs."""
     enable_debug_logging(debug)
-    _export(ExportFormat.go, location, output, server, schema_name, schema)
+    _export(ExportFormat.go, location, output, server, schema_name, schema, inline_references=inline_references)
 
 
 @export_app.command(
@@ -413,11 +529,12 @@ def export_spark(
     server: server_option = None,
     schema_name: schema_name_option = "all",
     schema: schema_option = None,
+    inline_references: inline_references_option = True,
     debug: debug_option = None,
 ):
     """Export a data contract to Spark schema."""
     enable_debug_logging(debug)
-    _export(ExportFormat.spark, location, output, server, schema_name, schema)
+    _export(ExportFormat.spark, location, output, server, schema_name, schema, inline_references=inline_references)
 
 
 @export_app.command(
@@ -430,11 +547,12 @@ def export_sqlalchemy(
     server: server_option = None,
     schema_name: schema_name_option = "all",
     schema: schema_option = None,
+    inline_references: inline_references_option = True,
     debug: debug_option = None,
 ):
     """Export a data contract to SQLAlchemy models."""
     enable_debug_logging(debug)
-    _export(ExportFormat.sqlalchemy, location, output, server, schema_name, schema)
+    _export(ExportFormat.sqlalchemy, location, output, server, schema_name, schema, inline_references=inline_references)
 
 
 @export_app.command(
@@ -447,11 +565,12 @@ def export_iceberg(
     server: server_option = None,
     schema_name: schema_name_option = "all",
     schema: schema_option = None,
+    inline_references: inline_references_option = True,
     debug: debug_option = None,
 ):
     """Export a data contract to Iceberg schema."""
     enable_debug_logging(debug)
-    _export(ExportFormat.iceberg, location, output, server, schema_name, schema)
+    _export(ExportFormat.iceberg, location, output, server, schema_name, schema, inline_references=inline_references)
 
 
 @export_app.command(
@@ -464,11 +583,12 @@ def export_sodacl(
     server: server_option = None,
     schema_name: schema_name_option = "all",
     schema: schema_option = None,
+    inline_references: inline_references_option = True,
     debug: debug_option = None,
 ):
     """Export a data contract to SodaCL checks."""
     enable_debug_logging(debug)
-    _export(ExportFormat.sodacl, location, output, server, schema_name, schema)
+    _export(ExportFormat.sodacl, location, output, server, schema_name, schema, inline_references=inline_references)
 
 
 @export_app.command(
@@ -486,10 +606,28 @@ def export_great_expectations(
     server: server_option = None,
     schema_name: schema_name_option = "all",
     schema: schema_option = None,
+    inline_references: inline_references_option = True,
     debug: debug_option = None,
+    suite_name: Annotated[
+        Optional[str],
+        typer.Option(help="The suite name for the Great Expectations run."),
+    ] = None,
+    checks: Annotated[
+        Optional[str],
+        typer.Option(
+            help="Comma-separated list of check categories to export "
+            f"(available: {', '.join(c.value for c in GreatExpectationsCheckCategory)}). Omit to export everything."
+        ),
+    ] = None,
 ):
     """Export a data contract to Great Expectations suite."""
     enable_debug_logging(debug)
+    check_categories = _parse_enum_csv(
+        checks,
+        GreatExpectationsCheckCategory,
+        "--checks",
+        "categories",
+    )
     _export(
         ExportFormat.great_expectations,
         location,
@@ -499,6 +637,9 @@ def export_great_expectations(
         schema,
         engine=engine.value if engine is not None else None,
         sql_server_type=dialect.value,
+        inline_references=inline_references,
+        suite_name=suite_name,
+        check_categories=check_categories,
     )
 
 
@@ -512,11 +653,14 @@ def export_data_caterer(
     server: server_option = None,
     schema_name: schema_name_option = "all",
     schema: schema_option = None,
+    inline_references: inline_references_option = True,
     debug: debug_option = None,
 ):
     """Export a data contract to Data Caterer format."""
     enable_debug_logging(debug)
-    _export(ExportFormat.data_caterer, location, output, server, schema_name, schema)
+    _export(
+        ExportFormat.data_caterer, location, output, server, schema_name, schema, inline_references=inline_references
+    )
 
 
 @export_app.command(
@@ -529,11 +673,12 @@ def export_dcs(
     server: server_option = None,
     schema_name: schema_name_option = "all",
     schema: schema_option = None,
+    inline_references: inline_references_option = True,
     debug: debug_option = None,
 ):
     """Export a data contract to DCS format."""
     enable_debug_logging(debug)
-    _export(ExportFormat.dcs, location, output, server, schema_name, schema)
+    _export(ExportFormat.dcs, location, output, server, schema_name, schema, inline_references=inline_references)
 
 
 @export_app.command(
@@ -546,11 +691,12 @@ def export_dqx(
     server: server_option = None,
     schema_name: schema_name_option = "all",
     schema: schema_option = None,
+    inline_references: inline_references_option = True,
     debug: debug_option = None,
 ):
     """Export a data contract to DQX format."""
     enable_debug_logging(debug)
-    _export(ExportFormat.dqx, location, output, server, schema_name, schema)
+    _export(ExportFormat.dqx, location, output, server, schema_name, schema, inline_references=inline_references)
 
 
 @export_app.command(
@@ -561,12 +707,16 @@ def export_excel(
     location: location_arg = "datacontract.yaml",
     template: Annotated[
         Optional[str],
-        typer.Option(help="Path or URL to a custom Excel template."),
+        typer.Option(
+            help="Path or URL to a custom Excel template. "
+            "Defaults to the bundled ODCS template for the contract's apiVersion."
+        ),
     ] = None,
     output: output_option = None,
     server: server_option = None,
     schema_name: schema_name_option = "all",
     schema: schema_option = None,
+    inline_references: inline_references_option = True,
     debug: debug_option = None,
 ):
     """Export a data contract to Excel."""
@@ -576,7 +726,16 @@ def export_excel(
         console.print("💡 Hint: Use --output to specify where to save the Excel file, e.g.:")
         console.print("   datacontract export excel --output datacontract.xlsx")
         raise typer.Exit(code=1)
-    _export(ExportFormat.excel, location, output, server, schema_name, schema, template=template)
+    _export(
+        ExportFormat.excel,
+        location,
+        output,
+        server,
+        schema_name,
+        schema,
+        template=template,
+        inline_references=inline_references,
+    )
 
 
 @export_app.command(
@@ -593,8 +752,18 @@ def export_custom(
     server: server_option = None,
     schema_name: schema_name_option = "all",
     schema: schema_option = None,
+    inline_references: inline_references_option = True,
     debug: debug_option = None,
 ):
     """Export a data contract using a custom Jinja template."""
     enable_debug_logging(debug)
-    _export(ExportFormat.custom, location, output, server, schema_name, schema, template=template)
+    _export(
+        ExportFormat.custom,
+        location,
+        output,
+        server,
+        schema_name,
+        schema,
+        template=template,
+        inline_references=inline_references,
+    )

@@ -9,6 +9,7 @@ from datacontract.imports.odcs_helper import (
     create_property,
     create_schema_object,
     create_server,
+    report_unmapped_types,
 )
 
 
@@ -109,7 +110,7 @@ def import_csv(source: str, include_examples: bool = False) -> OpenDataContractS
 
         unique = None
         if dc_type not in ["boolean", "array"]:
-            distinct_values = tbl.count(f'DISTINCT "{field_name}"').fetchone()[0]
+            distinct_values = con.sql(f'SELECT count(DISTINCT "{field_name}") FROM "{table_name}"').fetchone()[0]
             if distinct_values > 0 and distinct_values == tallies[("count", field_name)]:
                 unique = True
 
@@ -121,11 +122,6 @@ def import_csv(source: str, include_examples: bool = False) -> OpenDataContractS
             minimum = tallies[("min", field_name)]
             maximum = tallies[("max", field_name)]
 
-        # Build custom properties for format if present
-        custom_props = {}
-        if format_val:
-            custom_props["format"] = format_val
-
         prop = create_property(
             name=field_name,
             logical_type=dc_type,
@@ -135,7 +131,7 @@ def import_csv(source: str, include_examples: bool = False) -> OpenDataContractS
             examples=examples,
             minimum=minimum,
             maximum=maximum,
-            custom_properties=custom_props if custom_props else None,
+            format=format_val if format_val else None,
         )
         properties.append(prop)
 
@@ -147,6 +143,7 @@ def import_csv(source: str, include_examples: bool = False) -> OpenDataContractS
     )
 
     odcs.schema_ = [schema_obj]
+    report_unmapped_types(odcs, fallback="string")
 
     return odcs
 
@@ -162,18 +159,30 @@ _duck_db_types = {
     "USMALLINT": "integer",
     "UINTEGER": "integer",
     "UBIGINT": "integer",
+    "HUGEINT": "integer",
+    "UHUGEINT": "integer",
     "FLOAT": "number",
     "DOUBLE": "number",
+    "DECIMAL": "number",
     "VARCHAR": "string",
-    "TIMESTAMP": "date",
+    "UUID": "string",
+    "JSON": "object",
     "DATE": "date",
+    "TIME": "time",
+    "TIME WITH TIME ZONE": "time",
+    "TIMESTAMP": "timestamp",
+    "TIMESTAMP WITH TIME ZONE": "timestamp",
+    "TIMESTAMP_S": "timestamp",
+    "TIMESTAMP_MS": "timestamp",
+    "TIMESTAMP_NS": "timestamp",
 }
 
 
-def map_type_from_duckdb(sql_type: None | str) -> str:
-    """Map DuckDB type to ODCS logical type."""
+def map_type_from_duckdb(sql_type: None | str) -> str | None:
+    """Map DuckDB type to ODCS logical type, or None if the type has no mapping."""
     if sql_type is None:
-        return "string"
+        return None
 
-    sql_type_normed = sql_type.upper().strip()
-    return _duck_db_types.get(sql_type_normed, "string")
+    # DECIMAL(10,2) -> DECIMAL
+    sql_type_normed = sql_type.upper().strip().split("(")[0].strip()
+    return _duck_db_types.get(sql_type_normed)

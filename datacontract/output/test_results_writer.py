@@ -5,6 +5,7 @@ import typer
 from open_data_contract_standard.model import OpenDataContractStandard
 from rich import box
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from datacontract.model.run import Run
@@ -16,8 +17,8 @@ from datacontract.output.output_format import OutputFormat
 def write_test_result(
     run: Run,
     console: Console,
-    output_format: OutputFormat,
-    output_path: Path,
+    output_format: Optional[OutputFormat],
+    output_path: Optional[Path],
     data_contract: Optional[OpenDataContractStandard] = None,
 ):
     if output_format is not None and not output_path:
@@ -61,46 +62,72 @@ def write_test_result(
             if details_str:
                 console.print(f"Server: {run.server} ({details_str})")
 
-    _print_table(run, console)
+    if run.filters:
+        for schema_name, predicate in run.filters.items():
+            console.print(f"Row filter: {schema_name} WHERE {escape(predicate)}")
+
+    print_test_results_table(run, console)
     if run.result == "passed":
+        skipped = sum(1 for check in run.checks if check.result == "skipped")
+        skipped_info = f" ({skipped} skipped)" if skipped else ""
         console.print(
-            f"🟢 data contract is valid. Run {len(run.checks)} checks. Took {(run.timestampEnd - run.timestampStart).total_seconds()} seconds."
+            f"🟢 Data contract is valid. Ran {len(run.checks)} checks{skipped_info}. Took {(run.timestampEnd - run.timestampStart).total_seconds()} seconds."
+        )
+    elif run.result in ("skipped", "unknown"):
+        if run.result == "skipped" and run.dryRun:
+            reason = f"Planned {len(run.checks)} checks. "
+        elif run.result == "skipped":
+            reason = "All checks were skipped. "
+        else:
+            reason = ""
+        console.print(
+            f"⚪ No checks were executed. {reason}"
+            f"Took {(run.timestampEnd - run.timestampStart).total_seconds()} seconds."
         )
     elif run.result == "warning":
-        console.print("🟠 data contract has warnings. Found the following warnings:")
-        i = 1
-        for check in run.checks:
-            if check.result != "passed":
-                field = to_field(run, check)
-                if field:
-                    field = field + " "
-                else:
-                    field = ""
-                console.print(f"{i}) {field}{check.name}: {check.reason}")
-                i += 1
+        console.print("🟠 Data contract has warnings. Found the following warnings:")
+        print_findings(run, console)
     else:
-        console.print("🔴 data contract is invalid, found the following errors:")
-        i = 1
-        for check in run.checks:
-            if check.result != "passed":
-                field = to_field(run, check)
-                if field:
-                    field = field + " "
-                else:
-                    field = ""
-                console.print(f"{i}) {field}{check.name}: {check.reason}")
-                i += 1
+        console.print("🔴 Data contract is invalid, found the following errors:")
+        print_findings(run, console)
         raise typer.Exit(code=1)
 
 
-def _print_table(run, console):
+def print_findings(run, console):
+    """List every check that did not pass, folding checks that share a reason into one line."""
+    findings = [check for check in run.checks if check.result not in ("passed", "skipped")]
+    by_reason = {}
+    for check in findings:
+        by_reason.setdefault(check.reason, []).append(check)
+    i = 1
+    for check in findings:
+        group = by_reason[check.reason] if check.reason else [check]
+        if len(group) > 1:
+            if group[0] is not check:
+                continue
+            fields = ", ".join(dict.fromkeys(f for f in (to_field(run, c) for c in group) if f))
+            fields_info = f" on {escape(fields)}" if fields else ""
+            console.print(f"{i}) {len(group)} checks{fields_info}: {escape(str(check.reason))}")
+        else:
+            field = to_field(run, check)
+            field = field + " " if field else ""
+            console.print(f"{i}) {escape(field)}{escape(str(check.name))}: {escape(str(check.reason))}")
+        i += 1
+
+
+def print_test_results_table(run, console):
     table = Table(box=box.ROUNDED)
     table.add_column("Result", no_wrap=True)
     table.add_column("Check", max_width=100)
     table.add_column("Field", max_width=32)
     table.add_column("Details", max_width=50)
     for check in sorted(run.checks, key=lambda c: (c.result or "", c.model or "", c.field or "")):
-        table.add_row(with_markup(check.result), check.name, to_field(run, check), check.reason)
+        table.add_row(
+            with_markup(check.result),
+            escape(str(check.name)),
+            to_field(run, check),
+            escape(str(check.reason)) if check.reason else None,
+        )
     console.print(table)
 
 
@@ -123,4 +150,6 @@ def with_markup(result):
         return "[red]failed[/red]"
     if result == "error":
         return "[red]error[/red]"
+    if result == "skipped":
+        return "[dim blue]skipped[/dim blue]"
     return result

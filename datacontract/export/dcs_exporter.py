@@ -25,11 +25,33 @@ from open_data_contract_standard.model import (
 )
 
 from datacontract.export.exporter import Exporter
+from datacontract.model.enum_values import get_enum_values
+from datacontract.model.map_type import get_map_key, get_map_value, is_map
+from datacontract.model.vector_type import is_double
 
 
 class DcsExporter(Exporter):
-    def export(self, data_contract, schema_name, server, sql_server_type, export_args) -> dict:
+    def export(self, data_contract, schema_name, server, sql_server_type, export_args) -> str:
         return to_dcs_yaml(data_contract)
+
+
+def _to_bool(value) -> Optional[bool]:
+    """Coerce an ODCS custom property value to the boolean DCS types `pii` as.
+
+    Custom property values are untyped in ODCS, and the DCS importer writes this
+    one back out as `str(field.pii)` — so contracts in the wild carry the string
+    "True" where the specification wants a boolean. Returns None when the value
+    is not recognisably boolean, leaving it to the caller to keep it as-is.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized == "true":
+            return True
+        if normalized == "false":
+            return False
+    return None
 
 
 def to_dcs_yaml(data_contract: OpenDataContractStandard) -> str:
@@ -40,13 +62,18 @@ def to_dcs_yaml(data_contract: OpenDataContractStandard) -> str:
 
 def to_dcs(data_contract: OpenDataContractStandard) -> DataContractSpecification:
     """Convert an ODCS data contract to a DCS data contract."""
-    # Basic info
+    # Basic info. ODCS description is a structured object; DCS Info.description
+    # is a plain string, so map the purpose (the full description is carried in
+    # terms below).
     info = Info(
         title=data_contract.name,
         version=data_contract.version,
-        description=data_contract.description,
         status=data_contract.status,
     )
+    if isinstance(data_contract.description, str):
+        info.description = data_contract.description
+    elif data_contract.description is not None:
+        info.description = getattr(data_contract.description, "purpose", None)
 
     # Team/owner
     if data_contract.team:
@@ -145,11 +172,13 @@ def _convert_server(odcs_server: ODCSServer) -> DCSServer:
         dcs_server.port = odcs_server.port
     if odcs_server.catalog:
         dcs_server.catalog = odcs_server.catalog
-    if odcs_server.topic:
+    # These attributes are not part of the ODCS Server model; guard with getattr
+    # so converting a standard ODCS server does not raise AttributeError.
+    if getattr(odcs_server, "topic", None):
         dcs_server.topic = odcs_server.topic
-    if odcs_server.http_path:
+    if getattr(odcs_server, "http_path", None):
         dcs_server.http_path = odcs_server.http_path
-    if odcs_server.driver:
+    if getattr(odcs_server, "driver", None):
         dcs_server.driver = odcs_server.driver
 
     return dcs_server
@@ -211,17 +240,36 @@ def _convert_property_to_field(prop: SchemaProperty) -> Field:
             field.exclusiveMinimum = opts["exclusiveMinimum"]
         if "exclusiveMaximum" in opts:
             field.exclusiveMaximum = opts["exclusiveMaximum"]
-        if "enum" in opts:
-            field.enum = opts["enum"]
         if "format" in opts:
             field.format = opts["format"]
+
+    enum_values = get_enum_values(prop)
+    if enum_values:
+        field.enum = enum_values
+
+    if prop.logicalType and prop.logicalType.lower() == "vector":
+        field.type = "array"
+        field.items = Field(type="double" if is_double(prop) else "float")
+
+    if is_map(prop):
+        field.type = "map"
+        key, value = get_map_key(prop), get_map_value(prop)
+        field.keys = _convert_property_to_field(key) if key is not None else Field(type="string")
+        field.values = _convert_property_to_field(value) if value is not None else Field(type="string")
+        field.fields = None
 
     # Convert custom properties
     if prop.customProperties:
         field.config = {}
         for cp in prop.customProperties:
             if cp.property == "pii":
-                field.pii = cp.value
+                pii = _to_bool(cp.value)
+                if pii is None:
+                    # Not recognisably boolean, so keep it verbatim rather than
+                    # emit a `pii` of the wrong type.
+                    field.config[cp.property] = cp.value
+                else:
+                    field.pii = pii
             else:
                 field.config[cp.property] = cp.value
 
@@ -290,5 +338,9 @@ def _convert_logical_to_dcs_type(logical_type: Optional[str], physical_type: Opt
         return "array"
     elif lt == "object":
         return "object"
+    elif lt == "map":
+        return "map"
+    elif lt == "vector":
+        return "array"
     else:
         return logical_type

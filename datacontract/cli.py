@@ -1,27 +1,89 @@
 import logging
 import os
 import sys
+from enum import Enum
 from importlib import metadata
-from typing import Iterable
+from pathlib import Path
+from typing import Iterable, Optional
 
+import pydantic
 import typer
 from click import Context
+from dotenv import find_dotenv, load_dotenv
 from rich.console import Console
+from rich.markup import escape
 from typer.core import TyperGroup
 from typing_extensions import Annotated
+
+from datacontract.config import Config, cli_config, set_cli_config
+from datacontract.output.output_format import OutputFormat
 
 console = Console()
 
 debug_option = Annotated[bool, typer.Option(help="Enable debug logging")]
+inline_references_option = Annotated[
+    bool,
+    typer.Option(
+        help="Resolve authoritativeDefinitions of type definition, semantics or businessDefinition and inline them "
+        "into the contract. Relative URLs and semantics IRIs are looked up on the ENTROPY_DATA_HOST "
+        "(default https://api.entropy-data.com), other URLs are fetched directly, file "
+        "references are read from disk. See https://docs.datacontract.com/semantics"
+    ),
+]
+
+custom_quality_checks_option = Annotated[
+    Optional[Path],
+    typer.Option(
+        metavar="DIR",
+        help="Folder with the custom quality checks the contract's quality rules use, one YAML file per check. "
+        "Defaults to DATACONTRACT_CUSTOM_QUALITY_CHECKS.",
+    ),
+]
+
+
+def config_with_custom_quality_checks(custom_quality_checks: Optional[Path]) -> Config | None:
+    """The --config-file config, with the --custom-quality-checks folder if one was given."""
+    config = cli_config()
+    if custom_quality_checks is None:
+        return config
+    return Config.resolve(config).model_copy(update={"custom_quality_checks": str(custom_quality_checks)})
+
+
+# Order in which top-level commands appear in `datacontract --help` (cf. README.md)
+COMMAND_ORDER = [
+    "init",
+    "edit",
+    "lint",
+    "changelog",
+    "breaking",
+    "sync",  # `dbt sync` subcommand; no top-level `sync`, so this only orders the dbt group
+    "test",
+    "ci",
+    "export",
+    "dbt",
+    "import",
+    "catalog",
+    "publish",
+    "api",
+]
 
 
 class OrderedCommands(TyperGroup):
     def list_commands(self, ctx: Context) -> Iterable[str]:
-        return self.commands.keys()
+        known = set(COMMAND_ORDER)
+        # Trailing fallback keeps any future command visible even if COMMAND_ORDER forgets it.
+        return [c for c in COMMAND_ORDER if c in self.commands] + [c for c in self.commands if c not in known]
 
 
 class OrderedCommandsWithMigrationHints(OrderedCommands):
     """Intercepts removed or renamed options on import/export and points the user to the v0.12.0 migration notes."""
+
+    # Import formats where `--schema` still means the database schema, so it must
+    # not be rewritten to the v0.12.0 `--json-schema`.
+    DATABASE_SCHEMA_IMPORTS = {"snowflake", "redshift", "postgres", "athena", "sqlserver", "oracle", "trino"}
+    # Import formats where `--format` is the file format (json, csv, parquet, delta),
+    # not the removed v0.12.0 importer selector.
+    FILE_FORMAT_IMPORTS = {"s3", "gcs", "adls"}
 
     RENAMED_FLAGS = {
         "--format": None,
@@ -37,20 +99,31 @@ class OrderedCommandsWithMigrationHints(OrderedCommands):
     }
 
     def parse_args(self, ctx: Context, args):
-        # First positional argument
-        subcommand = next((a for a in args if isinstance(a, str) and not a.startswith("-")), None)
+        positionals = [a for a in args if isinstance(a, str) and not a.startswith("-")]
+        subcommand = positionals[0] if positionals else None
+
+        # this function is called by both `datacontract` and `datacontract import`
+        if subcommand == "import":
+            import_format = positionals[1] if len(positionals) > 1 else None
+        else:
+            import_format = subcommand
+        takes_database_schema = import_format in self.DATABASE_SCHEMA_IMPORTS
+        takes_file_format = import_format in self.FILE_FORMAT_IMPORTS
 
         rewritten_args = []
         for arg in args:
             if isinstance(arg, str) and arg.startswith("--"):
                 flag, _, value = arg.partition("=")
-                if flag == "--schema":
+                if flag == "--schema" and not takes_database_schema:
                     typer.secho(
-                        "Warning: --schema was replaced with --json-schema in v0.12.0 and will be removed in v0.13.0.",
+                        "Warning: --schema was replaced with --json-schema in v0.12.0 and will be removed soon.",
                         err=True,
                         fg=typer.colors.YELLOW,
                     )
                     rewritten_args.append(f"--json-schema={value}" if value else "--json-schema")
+                    continue
+                if flag == "--format" and takes_file_format:
+                    rewritten_args.append(arg)
                     continue
                 if flag in self.RENAMED_FLAGS:
                     new_flag = self.RENAMED_FLAGS[flag]
@@ -74,6 +147,10 @@ app = typer.Typer(
     cls=OrderedCommandsWithMigrationHints,
     no_args_is_help=True,
     add_completion=False,
+    # the locals of a --debug traceback can hold credentials
+    pretty_exceptions_show_locals=False,
+    help="CLI to manage data contracts. Documentation: https://docs.datacontract.com",
+    epilog="Read the full documentation at https://docs.datacontract.com",
 )
 
 
@@ -81,6 +158,19 @@ def version_callback(value: bool):
     if value:
         console.print(metadata.version("datacontract-cli"))
         raise typer.Exit()
+
+
+def inject_system_truststore() -> None:
+    """Verify TLS using the operating system's certificate trust store instead of the
+    bundled CA certificates. This lets the CLI work behind corporate proxies or with
+    internal CAs whose root certificates are installed in the OS trust store but not in
+    the certifi bundle that requests uses by default."""
+    try:
+        import truststore
+    except ImportError:
+        console.print("[red]--system-truststore requires the 'truststore' package, which is not installed.[/red]")
+        raise typer.Exit(code=1)
+    truststore.inject_into_ssl()
 
 
 @app.callback()
@@ -93,6 +183,20 @@ def common(
         callback=version_callback,
         is_eager=True,
     ),
+    system_truststore: bool = typer.Option(
+        False,
+        "--system-truststore",
+        help="Verify TLS using the operating system's certificate trust store "
+        "instead of the bundled CA certificates (e.g. behind a corporate proxy or internal CA).",
+        envvar="DATACONTRACT_SYSTEM_TRUSTSTORE",
+    ),
+    config_file: Optional[Path] = typer.Option(
+        None,
+        "--config-file",
+        help="Path to a YAML file with credentials and connection options "
+        "(sections per data source, ${VAR} references resolve from the environment). "
+        "Defaults to ./datacontract-config.yaml or ~/.datacontract/config.yaml if present.",
+    ),
 ):
     """
     The datacontract CLI is an open source command-line tool for working with Data Contracts (https://datacontract.com).
@@ -101,14 +205,81 @@ def common(
     connect to data sources and execute schema and quality tests,
     and export to different formats.
     """
-    pass
+    # Load environment variables (e.g., credentials) from a .env file in the
+    # current working directory, walking up parent directories until one is found.
+    # Already-set environment variables take precedence.
+    load_dotenv(dotenv_path=find_dotenv(usecwd=True), override=False)
+
+    set_cli_config(_load_config_file(config_file))
+
+    if system_truststore:
+        inject_system_truststore()
 
 
-def enable_debug_logging(debug: bool):
-    if debug:
-        logging.basicConfig(
-            level=logging.DEBUG, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", stream=sys.stderr
-        )
+def _load_config_file(config_file: "Optional[Path]"):
+    """Load the --config-file, or the first default location that exists."""
+    candidates = (
+        [config_file]
+        if config_file
+        else [Path("datacontract-config.yaml"), Path.home() / ".datacontract" / "config.yaml"]
+    )
+    for candidate in candidates:
+        if candidate.exists():
+            try:
+                return Config.from_yaml(candidate)
+            except (ValueError, pydantic.ValidationError) as e:
+                raise typer.BadParameter(str(e), param_hint="--config-file")
+    if config_file:
+        raise typer.BadParameter(f"Config file {config_file} does not exist.", param_hint="--config-file")
+    return None
+
+
+def enable_debug_logging(debug: bool, otherwise_disable_stderr: bool = False):
+    if not debug and otherwise_disable_stderr:
+        # some commands render run.logs to the console themselves; a NullHandler keeps
+        # the mirrored stdlib WARNING/ERROR (Run.log_*) off stderr so it isn't shown twice.
+        logging.basicConfig(handlers=[logging.NullHandler()], force=True)
+        return
+
+    logging.basicConfig(
+        level=logging.DEBUG if debug else logging.WARNING,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        stream=sys.stderr,
+        force=True,
+    )
+
+    if not debug:
+        # Keep noisy third-party loggers quiet
+        for noisy_logger in ("snowflake.connector", "py4j", "pyspark", "urllib3", "ibis"):
+            logging.getLogger(noisy_logger).setLevel(logging.ERROR)
+
+
+def validate_publish_url(publish: str | None) -> str | None:
+    """Normalize `--publish` and reject values that aren't http/https before any real work runs.
+
+    An empty value means "don't publish". CI templates that render the URL from an unset variable
+    pass `--publish ''` rather than omitting the option, e.g. GitHub Actions container actions,
+    where an argument list cannot drop an entry conditionally.
+    """
+    if not publish:
+        return None
+    if not (publish.startswith("http://") or publish.startswith("https://")):
+        console.print(f"[red]--publish URL must start with http:// or https:// (got: {publish!r}).[/red]")
+        raise typer.Exit(code=1)
+    return publish
+
+
+def resolve_output_format(output_format: Optional[OutputFormat], output: Optional[Path]) -> Optional[OutputFormat]:
+    if output_format is not None or output is None:
+        return output_format
+
+    inferred = OutputFormat.infer_from_output_path(output)
+    if inferred is None:
+        detail = f" from extension '{output.suffix}'" if output.suffix else ""
+        console.print(f"Error: Cannot infer output format{detail}. Please specify --output-format (json or junit).")
+        raise typer.Exit(code=1)
+
+    return inferred
 
 
 def _print_logs(run, out=None):
@@ -119,15 +290,69 @@ def _print_logs(run, out=None):
         out.print(log.timestamp.strftime("%y-%m-%d %H:%M:%S"), log.level.ljust(5), log.message)
 
 
+def _print_publish_failure(run, out=None):
+    """Surface the publish log messages on the console; logging is suppressed without --debug."""
+    if out is None:
+        out = console
+    for log in run.logs:
+        if log.level in ("WARN", "ERROR") and "publish" in log.message.lower():
+            color = "red" if log.level == "ERROR" else "yellow"
+            # highlight=False: render as prose, not rich's code-like repr highlighting.
+            out.print(f"[{color}]{escape(log.message)}[/{color}]", highlight=False)
+
+
+def _parse_enum_csv(
+    value: str | None,
+    enum_cls: type[Enum],
+    option: str,
+    label: str,
+    aliases: dict[str, Enum] | None = None,
+    available: str | None = None,
+) -> set[str] | None:
+    """Parse a comma-separated option into a set of enum values, or None if unset.
+
+    Matching is case-insensitive; `aliases` maps additional lowercase spellings
+    to their enum value. `available` overrides the choices shown in errors.
+    """
+    if value is None:
+        return None
+    allowed = [e.value for e in enum_cls]
+    raw = [v.strip() for v in value.split(",") if v.strip()]
+    if not raw:
+        console.print(f"[red]Empty {option} specified.[/red]")
+        console.print(f"Available {label}: {available or ', '.join(allowed)}")
+        raise typer.Exit(code=1)
+    aliases = aliases or {}
+    values = set()
+    invalid = set()
+    for v in raw:
+        key = v.lower()
+        if key in aliases:
+            values.add(aliases[key].value)
+        elif key in allowed:
+            values.add(key)
+        else:
+            invalid.add(v)
+    if invalid:
+        console.print(f"[red]Invalid {option} specified: {', '.join(sorted(invalid))}[/red]")
+        console.print(f"Available {label}: {available or ', '.join(allowed)}")
+        raise typer.Exit(code=1)
+    return values
+
+
 # ---------------------------------------------------------------------------
 # Register commands (must be after app and shared helpers are defined so the
 # command_* modules can import from this module without circular-import issues)
 # ---------------------------------------------------------------------------
+# Display order for `--help` is controlled by COMMAND_ORDER above, not by import order.
 from datacontract import (  # noqa: E402, F401
     command_api,
+    command_breaking,
     command_catalog,
     command_changelog,
     command_ci,
+    command_dbt,
+    command_edit,
     command_export,
     command_import,
     command_init,
@@ -136,7 +361,6 @@ from datacontract import (  # noqa: E402, F401
     command_test,
 )
 
-# Commands with subcommands
 app.add_typer(
     command_import.import_app,
     name="import",
@@ -149,9 +373,15 @@ app.add_typer(
     help="Convert a data contract to a target format.",
     epilog=(
         "Example: datacontract export html datacontract.yaml --output datacontract.html\n\n"
-        "For SQL dialects (postgres, mysql, snowflake, databricks, sqlserver, trino, oracle), "
+        "For SQL dialects (postgres, mysql, snowflake, databricks, sqlserver, trino, oracle, clickhouse), "
         "use `datacontract export sql --dialect <dialect>`."
     ),
+)
+app.add_typer(
+    command_dbt.dbt_app,
+    name="dbt",
+    help="Work with data contracts in your dbt project.",
+    epilog="Example: datacontract dbt sync orders.odcs.yaml --project-dir ./warehouse",
 )
 
 
@@ -162,7 +392,12 @@ def main():
         # If an uncaught exception occurs, only print its name (except when debug mode is enabled)
         if "--debug" in sys.argv or os.environ.get("DATACONTRACT_CLI_DEBUG") == "1":
             raise
-        console.print(f"[red]Error:[/red] {e}")
+        from datacontract.model.exceptions import DataContractException
+
+        message = e.reason if isinstance(e, DataContractException) else str(e)
+        # Escape the message: bracketed text in an exception (e.g. a driver's
+        # `pip install "botocore[crt]"` hint) would otherwise be eaten as rich markup.
+        console.print(f"[red]Error:[/red] {escape(message)}")
         console.print("[dim]Pass --debug (or set DATACONTRACT_CLI_DEBUG=1) for the full traceback.[/dim]")
         sys.exit(1)
 

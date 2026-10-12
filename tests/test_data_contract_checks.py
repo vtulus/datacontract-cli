@@ -1,8 +1,15 @@
 import yaml
-from open_data_contract_standard.model import DataQuality, OpenDataContractStandard, Server
+from open_data_contract_standard.model import (
+    DataQuality,
+    OpenDataContractStandard,
+    SchemaObject,
+    SchemaProperty,
+    Server,
+    ServiceLevelAgreementProperty,
+)
 
 from datacontract.data_contract import DataContract
-from datacontract.engines.data_contract_checks import (
+from datacontract.export.sodacl_check_builder import (
     QuotingConfig,
     _escape_sql_string_values,
     check_property_enum,
@@ -16,6 +23,8 @@ from datacontract.engines.data_contract_checks import (
     create_checks,
     prepare_query,
     to_schema_checks,
+    to_servicelevel_checks,
+    to_sla_freshness_check,
 )
 
 
@@ -70,6 +79,47 @@ def test_prepare_query_schema_placeholder_no_schema():
     assert result == "SELECT * FROM my_table"
 
 
+def test_prepare_query_dataset_and_project_placeholders():
+    """Test that {dataset} and {project} are replaced with the BigQuery server values."""
+    quality = DataQuality(type="sql", query="SELECT COUNT(*) FROM ${project}.${dataset}.${table}")
+    server = Server(type="bigquery", project="my_project", dataset="my_dataset")
+
+    result = prepare_query(quality, "my_table", None, QuotingConfig(), server)
+
+    assert result == "SELECT COUNT(*) FROM my_project.my_dataset.my_table"
+
+
+def test_prepare_query_dataset_placeholder_backticks():
+    """Test that {dataset} and {project} are backtick-quoted for bigquery."""
+    quality = DataQuality(type="sql", query="SELECT * FROM {project}.{dataset}.{model}")
+    server = Server(type="bigquery", project="my_project", dataset="my_dataset")
+    quoting_config = QuotingConfig(quote_model_name_with_backticks=True)
+
+    result = prepare_query(quality, "my_table", None, quoting_config, server)
+
+    assert result == "SELECT * FROM `my_project`.`my_dataset`.`my_table`"
+
+
+def test_prepare_query_catalog_and_database_placeholders():
+    """Test that {catalog} and {database} are replaced with the server values."""
+    quality = DataQuality(type="sql", query="SELECT * FROM {catalog}.{database}.{model}")
+    server = Server(**{"type": "databricks", "catalog": "my_catalog", "database": "my_database"})
+
+    result = prepare_query(quality, "my_table", None, QuotingConfig(), server)
+
+    assert result == "SELECT * FROM my_catalog.my_database.my_table"
+
+
+def test_prepare_query_dataset_placeholder_falls_back_to_model_name():
+    """Test that {dataset} falls back to the model name when the server has no dataset."""
+    quality = DataQuality(type="sql", query="SELECT * FROM {dataset}")
+    server = Server(**{"type": "postgres", "schema": "my_schema"})
+
+    result = prepare_query(quality, "my_table", None, QuotingConfig(), server)
+
+    assert result == "SELECT * FROM my_table"
+
+
 def test_prepare_query_schema_placeholder_with_dollar():
     """Test that ${schema} placeholder (with $) is replaced with server schema."""
     quality = DataQuality(type="sql", query="SELECT * FROM ${schema}.${model}")
@@ -88,6 +138,24 @@ def test_prepare_query_all_placeholders_with_dollar():
     result = prepare_query(quality, "my_table", "my_field", QuotingConfig(), server)
 
     assert result == "SELECT my_field FROM my_schema.my_table"
+
+
+def test_prepare_query_object_placeholder():
+    """Test that {object} and ${object} placeholders are replaced with the model name (ODCS spec terminology)."""
+    quality = DataQuality(type="sql", query="SELECT COUNT(*) FROM {object} WHERE ${object} IS NOT NULL")
+
+    result = prepare_query(quality, "my_table", None, QuotingConfig(), None)
+
+    assert result == "SELECT COUNT(*) FROM my_table WHERE my_table IS NOT NULL"
+
+
+def test_prepare_query_object_and_property_placeholders():
+    """Test the canonical ODCS-spec example: SELECT COUNT(*) FROM {object} WHERE {property} IS NOT NULL."""
+    quality = DataQuality(type="sql", query="SELECT COUNT(*) FROM {object} WHERE {property} IS NOT NULL")
+
+    result = prepare_query(quality, "my_table", "my_field", QuotingConfig(), None)
+
+    assert result == "SELECT COUNT(*) FROM my_table WHERE my_field IS NOT NULL"
 
 
 def test_prepare_query_field_backtick_quoting():
@@ -442,3 +510,214 @@ def test_check_property_missing_values_escapes_single_quotes():
     check_config = checks[0]["missing_count(status) = 0"]
     assert "peter''s" in check_config["missing values"]
     assert "n/a" in check_config["missing values"]
+
+
+def _freshness_contract(model_name: str = "events"):
+    return OpenDataContractStandard(
+        kind="DataContract",
+        apiVersion="v3.1.0",
+        id="freshness-test",
+        schema=[
+            SchemaObject(
+                name=model_name,
+                properties=[SchemaProperty(name="ts", logicalType="timestamp")],
+            )
+        ],
+    )
+
+
+def _freshness_sla(element: str):
+    return ServiceLevelAgreementProperty(property="freshness", element=element, value=24, unit="h")
+
+
+def test_freshness_check_quotes_dollar_field_on_athena():
+    """Athena pseudo-columns like $file_modified_time must be ANSI-quoted to parse."""
+    contract = _freshness_contract("events")
+    sla = _freshness_sla("events.$file_modified_time")
+    server = Server(type="athena")
+
+    check = to_sla_freshness_check(contract, sla, server)
+
+    impl = yaml.safe_load(check.implementation)
+    keys = list(impl["checks for events"][0].keys())
+    assert keys == ['freshness("$file_modified_time") < 24h']
+
+
+def test_freshness_check_leaves_dollar_field_bare_on_postgres():
+    """Postgres allows `$` as a continuation char in bare identifiers; quoting it would
+    force avoidable case-sensitivity on a case-folding dialect."""
+    contract = _freshness_contract("orders")
+    sla = _freshness_sla("orders.col$ext")
+    server = Server(type="postgres")
+
+    check = to_sla_freshness_check(contract, sla, server)
+
+    impl = yaml.safe_load(check.implementation)
+    keys = list(impl["checks for orders"][0].keys())
+    assert keys == ["freshness(col$ext) < 24h"]
+
+
+def test_freshness_check_backticks_special_field_on_databricks():
+    """Backtick dialects (Databricks/Spark) reject `$` bare and need backtick-quoting."""
+    contract = _freshness_contract("events")
+    sla = _freshness_sla("events.$file_modified_time")
+    server = Server(type="databricks")
+
+    check = to_sla_freshness_check(contract, sla, server)
+
+    impl = yaml.safe_load(check.implementation)
+    keys = list(impl["checks for events"][0].keys())
+    assert keys == ["freshness(`$file_modified_time`) < 24h"]
+
+
+# --- Field-level physicalName resolution (ODCS) ---
+
+
+def test_field_checks_use_physical_name_when_set():
+    """When a property declares a physicalName, field checks must target it.
+
+    physicalName is the actual column name in the system under test. The
+    table level already prefers physicalName (to_schema_name); the field
+    level must do the same, otherwise a contract with a logical name like
+    `brand` and physicalName `BRAND` fails "required column missing" even
+    though the BRAND column exists.
+    """
+    schema_object = SchemaObject(
+        name="orders",
+        properties=[SchemaProperty(name="brand", physicalName="BRAND", logicalType="string")],
+    )
+
+    checks = to_schema_checks(schema_object=schema_object, server=Server(type="snowflake"))
+
+    present = next(c for c in checks if c.type == "field_is_present")
+    assert present.field == "BRAND"
+    # Key is "checks for <model>" (model name may be quoted per dialect) — read
+    # it positionally rather than hardcoding the dialect-specific spelling.
+    impl = yaml.safe_load(present.implementation)
+    (sodacl_checks,) = impl.values()
+    assert sodacl_checks[0]["schema"]["fail"]["when required column missing"] == ["BRAND"]
+
+    type_check = next(c for c in checks if c.type == "field_type")
+    assert type_check.field == "BRAND"
+
+
+def test_field_checks_fall_back_to_name_without_physical_name():
+    """Without physicalName, field checks use the logical name (unchanged)."""
+    schema_object = SchemaObject(
+        name="orders",
+        properties=[SchemaProperty(name="sku", logicalType="string")],
+    )
+
+    checks = to_schema_checks(schema_object=schema_object, server=Server(type="snowflake"))
+
+    present = next(c for c in checks if c.type == "field_is_present")
+    assert present.field == "sku"
+
+
+def test_servicelevel_checks_use_physical_names_when_set():
+    """Freshness/retention SodaCL must target physicalName, like the schema checks.
+
+    The `checks for X` block names the dataset Soda scans; the sla element
+    speaks contract language. Without resolution, a contract whose object
+    name differs from the relation name emits checks against a dataset that
+    does not exist.
+    """
+    contract = OpenDataContractStandard(
+        kind="DataContract",
+        apiVersion="v3.1.0",
+        id="freshness-test",
+        schema=[
+            SchemaObject(
+                name="events",
+                physicalName="events_v1",
+                properties=[SchemaProperty(name="ts", physicalName="TS", logicalType="timestamp")],
+            )
+        ],
+    )
+    contract.slaProperties = [
+        ServiceLevelAgreementProperty(property="freshness", element="events.ts", value=24, unit="h"),
+        ServiceLevelAgreementProperty(property="retention", element="events.ts", value=1, unit="y"),
+    ]
+
+    freshness, retention = to_servicelevel_checks(contract, Server(type="snowflake"))
+
+    assert freshness.model == "events_v1"
+    fresh_impl = yaml.safe_load(freshness.implementation)
+    assert list(fresh_impl["checks for events_v1"][0].keys()) == ["freshness(TS) < 24h"]
+
+    assert retention.model == "events_v1"
+    ret_impl = yaml.safe_load(retention.implementation)
+    (entry,) = ret_impl["checks for events_v1"]
+    ((_, config),) = entry.items()
+    assert "MIN(TS)" in config["events_v1_servicelevel_retention expression"]
+
+
+def test_servicelevel_checks_keep_kafka_logical_name():
+    """to_schema_name reads the Spark SQL view (logical name) on kafka, not the topic."""
+    contract = OpenDataContractStandard(
+        kind="DataContract",
+        apiVersion="v3.1.0",
+        id="freshness-test",
+        schema=[
+            SchemaObject(
+                name="events",
+                physicalName="events-topic",
+                properties=[SchemaProperty(name="ts", logicalType="timestamp")],
+            )
+        ],
+    )
+    contract.slaProperties = [
+        ServiceLevelAgreementProperty(property="freshness", element="events.ts", value=24, unit="h"),
+    ]
+
+    (freshness,) = to_servicelevel_checks(contract, Server(type="kafka"))
+
+    assert freshness.model == "events"
+    fresh_impl = yaml.safe_load(freshness.implementation)
+    assert "checks for events" in fresh_impl
+
+
+# ---------------------------------------------------------------------------
+# Databricks varchar/map type-check skip (#1245, #1219)
+# ---------------------------------------------------------------------------
+
+
+def test_to_schema_checks_non_databricks_varchar_still_produces_type_check():
+    """Non-Databricks server with varchar physicalType still emits a field_type check."""
+    schema_object = SchemaObject(
+        name="orders",
+        properties=[SchemaProperty(name="name", physicalType="varchar(30)")],
+    )
+    server = Server(type="snowflake")
+
+    checks = to_schema_checks(schema_object=schema_object, server=server)
+
+    types = [c.type for c in checks]
+    assert "field_type" in types
+
+
+def test_to_schema_checks_databricks_struct_with_nested_varchar_skips_type_check():
+    """Databricks struct column whose nested property has varchar physicalType skips type check.
+
+    The parent physicalType (struct<varchar_field:string>) does not itself contain
+    varchar as a type token, but the nested property does — so the parent check
+    must be skipped too (issue #1245).
+    """
+    nested = SchemaProperty(name="varchar_field", physicalType="varchar(100)")
+    schema_object = SchemaObject(
+        name="complex_datatypes",
+        properties=[
+            SchemaProperty(
+                name="struct_with_varchar_test",
+                physicalType="struct<varchar_field:string>",
+                properties=[nested],
+            )
+        ],
+    )
+    server = Server(type="databricks")
+
+    checks = to_schema_checks(schema_object=schema_object, server=server)
+
+    types = [c.type for c in checks]
+    assert "field_is_present" in types
+    assert "field_type" not in types

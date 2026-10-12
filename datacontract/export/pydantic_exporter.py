@@ -5,10 +5,12 @@ from typing import Optional
 from open_data_contract_standard.model import OpenDataContractStandard, SchemaObject, SchemaProperty
 
 from datacontract.export.exporter import Exporter
+from datacontract.model.enum_values import get_enum_values
+from datacontract.model.map_type import get_map_key, get_map_value
 
 
 class PydanticExporter(Exporter):
-    def export(self, data_contract, schema_name, server, sql_server_type, export_args) -> dict:
+    def export(self, data_contract, schema_name, server, sql_server_type, export_args) -> str:
         return to_pydantic_model_str(data_contract)
 
 
@@ -72,6 +74,38 @@ def product_of(nodes: list[typing.Any]) -> ast.Subscript:
 type_annotation_type = typing.Union[ast.Name, ast.Attribute, ast.Constant, ast.Subscript]
 
 
+def field_value(prop: SchemaProperty) -> ast.expr | None:
+    """None means a bare annotation with no assignment."""
+    match prop.logicalType:
+        case "string":
+            constraints = (("pattern", "pattern"), ("minLength", "min_length"), ("maxLength", "max_length"))
+        case "integer" | "number" | "date" | "timestamp" | "time":
+            constraints = (
+                ("minimum", "ge"),
+                ("maximum", "le"),
+                ("exclusiveMinimum", "gt"),
+                ("exclusiveMaximum", "lt"),
+            )
+        case _:
+            constraints = ()
+    options = prop.logicalTypeOptions or {}
+    keywords = []
+    for option, keyword in constraints:
+        value = options.get(option)
+        # Draft-04 JSON Schema had boolean exclusive bounds, and an empty pattern does not import back.
+        if isinstance(value, (int, float, str)) and not isinstance(value, bool) and value != "":
+            keywords.append(ast.keyword(arg=keyword, value=ast.Constant(value)))
+    if not keywords:
+        return None if prop.required else ast.Constant(None)
+    if not prop.required:
+        keywords.insert(0, ast.keyword(arg="default", value=ast.Constant(None)))
+    return ast.Call(
+        func=ast.Attribute(value=ast.Name(id="pydantic", ctx=ast.Load()), attr="Field", ctx=ast.Load()),
+        args=[],
+        keywords=keywords,
+    )
+
+
 def _get_type(prop: SchemaProperty) -> Optional[str]:
     """Get the logical type from a schema property."""
     return prop.logicalType
@@ -88,6 +122,17 @@ def constant_field_annotation(
     prop_type = _get_type(prop)
     physical_type = _get_physical_type(prop)
 
+    enum_values = get_enum_values(prop)
+    if enum_values and prop_type in ("string", "integer") and all(isinstance(v, (str, int)) for v in enum_values):
+        return (
+            ast.Subscript(
+                value=ast.Attribute(value=ast.Name(id="typing", ctx=ast.Load()), attr="Literal", ctx=ast.Load()),
+                slice=ast.Tuple(elts=[ast.Constant(v) for v in enum_values], ctx=ast.Load()),
+                ctx=ast.Load(),
+            ),
+            None,
+        )
+
     match prop_type:
         case "string":
             return (ast.Name("str", ctx=ast.Load()), None)
@@ -102,7 +147,11 @@ def constant_field_annotation(
         case "boolean":
             return (ast.Name("bool", ctx=ast.Load()), None)
         case "date":
+            return (ast.Attribute(value=ast.Name(id="datetime", ctx=ast.Load()), attr="date"), None)
+        case "timestamp":
             return (ast.Attribute(value=ast.Name(id="datetime", ctx=ast.Load()), attr="datetime"), None)
+        case "time":
+            return (ast.Attribute(value=ast.Name(id="datetime", ctx=ast.Load()), attr="time"), None)
         case "array":
             if prop.items:
                 (annotated_type, new_class) = type_annotation(field_name, prop.items)
@@ -111,6 +160,23 @@ def constant_field_annotation(
         case "object":
             classdef = generate_field_class(field_name.capitalize(), prop)
             return (ast.Name(field_name.capitalize(), ctx=ast.Load()), classdef)
+        case "vector":
+            return (list_of(ast.Name("float", ctx=ast.Load())), None)
+        case "map":
+            key, value = get_map_key(prop), get_map_value(prop)
+            key_type = constant_field_annotation(field_name, key)[0] if key is not None else ast.Name("str")
+            if value is not None:
+                (value_type, new_class) = constant_field_annotation(field_name, value)
+            else:
+                (value_type, new_class) = (ast.Name("typing.Any", ctx=ast.Load()), None)
+            return (
+                ast.Subscript(
+                    value=ast.Name(id="dict", ctx=ast.Load()),
+                    slice=ast.Tuple(elts=[key_type, value_type], ctx=ast.Load()),
+                    ctx=ast.Load(),
+                ),
+                new_class,
+            )
         case _:
             # Check physical type for more specific mappings
             if physical_type:
@@ -164,12 +230,21 @@ def field_definitions(properties: list[SchemaProperty]) -> tuple[list[ast.Expr],
     classes = []
     for prop in properties:
         (ann, new_class) = type_annotation(prop.name, prop)
-        annotations.append(ast.AnnAssign(target=ast.Name(id=prop.name, ctx=ast.Store()), annotation=ann, simple=1))
+        annotations.append(
+            ast.AnnAssign(
+                target=ast.Name(id=prop.name, ctx=ast.Store()), annotation=ann, value=field_value(prop), simple=1
+            )
+        )
         if prop.description and is_simple_field(prop):
             annotations.append(ast.Expr(ast.Constant(prop.description)))
         if new_class:
             classes.append(new_class)
     return (annotations, classes)
+
+
+def class_body(statements: list[typing.Any]) -> list[typing.Any]:
+    """A class needs a body: an object without properties still has to parse."""
+    return statements or [ast.Pass()]
 
 
 def generate_field_class(field_name: str, prop: SchemaProperty) -> ast.ClassDef:
@@ -181,7 +256,7 @@ def generate_field_class(field_name: str, prop: SchemaProperty) -> ast.ClassDef:
     return ast.ClassDef(
         name=field_name,
         bases=[ast.Attribute(value=ast.Name(id="pydantic", ctx=ast.Load()), attr="BaseModel", ctx=ast.Load())],
-        body=[*documentation, *new_classes, *annotated_type],
+        body=class_body([*documentation, *new_classes, *annotated_type]),
         keywords=[],
         decorator_list=[],
     )
@@ -193,7 +268,7 @@ def generate_model_class(name: str, schema_obj: SchemaObject) -> ast.ClassDef:
     result = ast.ClassDef(
         name=name.capitalize(),
         bases=[ast.Attribute(value=ast.Name(id="pydantic", ctx=ast.Load()), attr="BaseModel", ctx=ast.Load())],
-        body=[*documentation, *nested_classes, *field_assignments],
+        body=class_body([*documentation, *nested_classes, *field_assignments]),
         keywords=[],
         decorator_list=[],
     )

@@ -23,7 +23,7 @@ def test_import_sql_postgres():
     result = DataContract.import_from_source("sql", sql_file_path, dialect="postgres")
 
     expected = """
-apiVersion: v3.1.0
+apiVersion: v3.2.0
 kind: DataContract
 id: my-data-contract
 name: My Data Contract
@@ -49,6 +49,8 @@ schema:
         physicalType: VARCHAR(10)
         primaryKey: true
         primaryKeyPosition: 1
+        required: true
+        unique: true
       - name: field_two
         logicalType: integer
         physicalType: INT
@@ -65,7 +67,7 @@ def test_import_sql_constraints():
     result = DataContract.import_from_source("sql", "fixtures/postgres/data/data_constraints.sql", dialect="postgres")
 
     expected = """
-apiVersion: v3.1.0
+apiVersion: v3.2.0
 kind: DataContract
 id: my-data-contract
 name: My Data Contract
@@ -77,7 +79,7 @@ servers:
     host: my_host
     port: 5432
     database: my_database
-    schema: public
+    schema: my_schema
 schema:
   - name: customer_location
     physicalType: table
@@ -87,7 +89,10 @@ schema:
       - name: id
         logicalType: number
         physicalType: DECIMAL
+        primaryKey: true
+        primaryKeyPosition: 1
         required: true
+        unique: true
       - name: created_by
         logicalType: string
         logicalTypeOptions:
@@ -147,3 +152,57 @@ schema:
     """
     print("Result", result.to_yaml())
     assert yaml.safe_load(result.to_yaml()) == yaml.safe_load(expected)
+
+
+def test_import_sql_ignores_create_schema(tmp_path):
+    ddl = tmp_path / "ddl.sql"
+    ddl.write_text("CREATE SCHEMA sales;\nCREATE TABLE sales.orders (order_id VARCHAR(36));")
+
+    result = DataContract.import_from_source("sql", str(ddl), dialect="postgres")
+
+    assert [schema_object.name for schema_object in result.schema_] == ["orders"]
+
+
+def test_import_sql_warns_about_skipped_unparsable_statement(tmp_path, caplog):
+    ddl = tmp_path / "ddl.sql"
+    ddl.write_text("CREATE TABLE my-database.my-schema.employees (employee_id INT);")
+
+    result = DataContract.import_from_source("sql", str(ddl), dialect="postgres")
+
+    assert result.schema_ == []
+    assert "Skipping statement that could not be parsed as postgres SQL" in caplog.text
+    assert "CREATE TABLE my-database.my-schema.employees" in caplog.text
+
+
+def test_import_sql_keeps_same_named_tables_in_different_schemas_apart(tmp_path):
+    ddl = tmp_path / "ddl.sql"
+    ddl.write_text(
+        "CREATE SCHEMA sales;\nCREATE TABLE orders (order_id VARCHAR(36));\nCREATE TABLE sales.orders (amount INT);"
+    )
+
+    result = DataContract.import_from_source("sql", str(ddl), dialect="postgres")
+
+    assert [[prop.name for prop in schema_object.properties] for schema_object in result.schema_] == [
+        ["order_id"],
+        ["amount"],
+    ]
+
+
+def test_import_sql_maps_temporal_types_inside_map_and_struct(tmp_path):
+    ddl = tmp_path / "t.sql"
+    ddl.write_text("CREATE TABLE ev (m MAP<STRING, TIMESTAMP>, s MAP<TIMESTAMP, STRUCT<x DATETIME, raw BINARY>>);")
+
+    result = DataContract.import_from_source("sql", str(ddl), dialect="databricks")
+
+    properties = {p.name: p for p in result.schema_[0].properties}
+    assert properties["m"].map.value.logicalType == "timestamp"
+    assert properties["s"].map.key.logicalType == "timestamp"
+    nested = {p.name: p for p in properties["s"].map.value.properties}
+    assert nested["x"].logicalType == "timestamp"
+    assert nested["raw"].logicalType == "string"
+
+
+def test_map_type_from_sql_uuid():
+    from datacontract.imports.sql_importer import map_type_from_sql
+
+    assert map_type_from_sql("uuid") == ("string", "uuid")

@@ -1,18 +1,54 @@
 import importlib.resources as resources
+import json
 import logging
+import re
+import time
+import typing
 from pathlib import Path
+from urllib.parse import quote, urljoin, urlparse
 
-import fastjsonschema
+import requests
 import yaml
-from fastjsonschema import JsonSchemaValueException
 from jsonschema import validators
+from jsonschema.exceptions import best_match
 from open_data_contract_standard.model import OpenDataContractStandard, SchemaProperty
+from pydantic import BaseModel, ConfigDict
 
+from datacontract.config import Config
+from datacontract.config.variables import contains_variables
+from datacontract.lint.constraints import enum_value_errors
 from datacontract.lint.resources import read_resource
 from datacontract.lint.schema import fetch_schema
-from datacontract.model.exceptions import DataContractException, DataContractValidationErrors
+from datacontract.model.exceptions import (
+    DataContractException,
+    DataContractValidationErrors,
+    DefinitionResolutionError,
+)
 from datacontract.model.odcs import is_open_data_contract_standard, is_open_data_product_standard
 from datacontract.model.run import ResultEnum
+
+logger = logging.getLogger(__name__)
+# v3.0.0 and v3.0.1 are the 3.0.2 grammar apart from the Athena staging_dir/stagingDir
+# rename, and the rest of the CLI reads stagingDir.
+ODCS_SCHEMA_VERSIONS = {
+    "v3.0.0": "3.0.2",
+    "v3.0.1": "3.0.2",
+    "v3.0.2": "3.0.2",
+    "v3.1.0": "3.1.0",
+    "v3.2.0": "3.2.0",
+}
+DEFAULT_ODCS_SCHEMA_VERSION = "3.2.0"
+
+
+class _LaxOpenDataContractStandard(OpenDataContractStandard):
+    """ODCS variant that accepts unknown top-level fields.
+
+    Used when the contract is validated against a user-supplied JSON schema
+    (`--json-schema`): the custom schema is the source of truth, so the
+    Pydantic step must not re-reject extras the schema already accepted.
+    """
+
+    model_config = ConfigDict(extra="allow")
 
 
 class _SafeLoaderNoTimestamp(yaml.SafeLoader):
@@ -28,14 +64,45 @@ _SafeLoaderNoTimestamp.yaml_implicit_resolvers = {
 }
 
 
+def _resolve_jsonschema_compliance_error_message_path(yaml_str, message):
+    except_message = message
+
+    try:
+        matches = re.findall(r"\[(\d+)\]", message)
+        schema_index = matches[0] if len(matches) > 0 else None
+        property_index = matches[1] if len(matches) > 1 else None
+        if schema_index is not None and "schema" in yaml_str and int(schema_index) < len(yaml_str["schema"]):
+            except_message = except_message.replace(
+                f"schema[{schema_index}]", f"schema.{yaml_str['schema'][int(schema_index)]['name']}"
+            )
+
+        if (
+            property_index is not None
+            and "schema" in yaml_str
+            and int(schema_index) < len(yaml_str["schema"])
+            and "properties" in yaml_str["schema"][int(schema_index)]
+            and int(property_index) < len(yaml_str["schema"][int(schema_index)]["properties"])
+        ):
+            except_message = except_message.replace(
+                f"properties[{property_index}]",
+                f"properties.{yaml_str['schema'][int(schema_index)]['properties'][int(property_index)]['name']}",
+            )
+    except Exception:
+        logger.warning("YAML doesn't conform to JSON schema. Could not resolve indexed schema or property names.")
+        except_message = message
+
+    return except_message
+
+
 def resolve_data_contract_dict(
     data_contract_location: str = None,
     data_contract_str: str = None,
     data_contract: OpenDataContractStandard = None,
+    config: "Config | None" = None,
 ) -> dict:
     """Resolve a data contract and return it as a dictionary."""
     if data_contract_location is not None:
-        return _to_yaml(read_resource(data_contract_location))
+        return _to_yaml(read_resource(data_contract_location, config), data_contract_location)
     elif data_contract_str is not None:
         return _to_yaml(data_contract_str)
     elif data_contract is not None:
@@ -46,7 +113,7 @@ def resolve_data_contract_dict(
             result=ResultEnum.failed,
             name="Check that data contract YAML is valid",
             reason="Data contract needs to be provided",
-            engine="datacontract",
+            engine="datacontract-cli",
         )
 
 
@@ -55,160 +122,876 @@ def resolve_data_contract(
     data_contract_str: str = None,
     data_contract: OpenDataContractStandard = None,
     schema_location: str = None,
-    inline_definitions: bool = False,
+    inline_references: bool = False,
     all_errors: bool = False,
+    config: "Config | None" = None,
+    configured_host_only: bool = False,
 ) -> OpenDataContractStandard:
     """Resolve and parse a data contract from various sources."""
+    return resolve_data_contract_with_lint_info(
+        data_contract_location,
+        data_contract_str,
+        data_contract,
+        schema_location,
+        inline_references,
+        all_errors,
+        config,
+        configured_host_only=configured_host_only,
+    )[0]
+
+
+def resolve_data_contract_with_lint_info(
+    data_contract_location: str = None,
+    data_contract_str: str = None,
+    data_contract: OpenDataContractStandard = None,
+    schema_location: str = None,
+    inline_references: bool = False,
+    all_errors: bool = False,
+    config: "Config | None" = None,
+    use_declared_api_version: bool = False,
+    configured_host_only: bool = False,
+) -> tuple[OpenDataContractStandard, str | None, list[DataContractException]]:
+    """Resolve a data contract and report the ODCS version it was validated against,
+    along with the lint warnings that did not fail validation.
+
+    With use_declared_api_version, the schema is the one for the contract's own
+    apiVersion. The reported version is None when no bundled ODCS schema was used: a
+    custom schema, a DCS contract, or an already-parsed contract.
+
+    With configured_host_only, authoritativeDefinitions are only fetched from the
+    configured Entropy Data host; any other host is refused.
+    """
     if data_contract_location is not None:
-        return resolve_data_contract_from_location(
-            data_contract_location, schema_location, inline_definitions, all_errors
+        return _resolve_data_contract_from_str(
+            read_resource(data_contract_location, config),
+            schema_location,
+            inline_references,
+            all_errors,
+            config,
+            base_location=data_contract_location,
+            use_declared_api_version=use_declared_api_version,
+            configured_host_only=configured_host_only,
         )
     elif data_contract_str is not None:
-        return _resolve_data_contract_from_str(data_contract_str, schema_location, inline_definitions, all_errors)
+        return _resolve_data_contract_from_str(
+            data_contract_str,
+            schema_location,
+            inline_references,
+            all_errors,
+            config,
+            use_declared_api_version=use_declared_api_version,
+            configured_host_only=configured_host_only,
+        )
     elif data_contract is not None:
-        return data_contract
+        return data_contract, None, []
     else:
         raise DataContractException(
             type="lint",
             result=ResultEnum.failed,
             name="Check that data contract YAML is valid",
             reason="Data contract needs to be provided",
-            engine="datacontract",
+            engine="datacontract-cli",
         )
 
 
 def resolve_data_contract_from_location(
-    location, schema_location: str = None, inline_definitions: bool = False, all_errors: bool = False
+    location,
+    schema_location: str = None,
+    inline_references: bool = False,
+    all_errors: bool = False,
+    config: "Config | None" = None,
 ) -> OpenDataContractStandard:
-    data_contract_str = read_resource(location)
-    return _resolve_data_contract_from_str(data_contract_str, schema_location, inline_definitions, all_errors)
+    data_contract_str = read_resource(location, config)
+    return _resolve_data_contract_from_str(
+        data_contract_str, schema_location, inline_references, all_errors, config, base_location=location
+    )[0]
 
 
-def inline_definitions_into_data_contract(data_contract: OpenDataContractStandard):
-    """Inline any definition references into the schema properties."""
+# Precedence-ordered: a property with both semantics and definition references
+# resolves through semantics (matches the editor's useInheritedDefinition).
+# "semantic" (singular) is accepted for back-compat with contracts written
+# before the entropy-data type migration. `businessDefinition` is the ODCS type
+# for "the business meaning of this field lives over there" -- it resolves like
+# the others, and whether the target is a file or a URL is decided by the url's
+# own shape, not by the type.
+_RESOLVABLE_AUTHORITATIVE_TYPES = ("semantics", "semantic", "definition", "businessDefinition")
+
+# A fragment-less url with one of these suffixes is read from disk. Everything
+# else without a fragment stays a path on the configured host.
+_DEFINITION_FILE_SUFFIXES = frozenset({".yaml", ".yml", ".json"})
+
+# `name` and `id` are the property's own; `authoritativeDefinitions` is the link itself;
+# `properties`/`items` are the contract author's structure.
+_NON_MERGEABLE_FIELDS = frozenset({"id", "name", "authoritativeDefinitions", "properties", "items"})
+
+
+class _ExpiringCache:
+    """Success-only cache whose entries expire"""
+
+    def __init__(self):
+        self._entries: dict[str, tuple[float, object]] = {}
+
+    @staticmethod
+    def _expired(entry: tuple[float, object]) -> bool:
+        return time.monotonic() - entry[0] > 60
+
+    def get(self, key: str):
+        entry = self._entries.get(key)
+        if entry is None:
+            return None
+        if self._expired(entry):
+            self._entries.pop(key, None)
+            return None
+        return entry[1]
+
+    def put(self, key: str, value) -> None:
+        for stale_key, entry in list(self._entries.items()):
+            if self._expired(entry):
+                self._entries.pop(stale_key, None)
+        self._entries[key] = (time.monotonic(), value)
+
+    def clear(self) -> None:
+        self._entries.clear()
+
+
+# Transient failures aren't cached so they can retry on the next run.
+_definition_cache = _ExpiringCache()
+_local_contract_cache = _ExpiringCache()
+_local_definition_cache = _ExpiringCache()
+
+
+def clear_definition_cache() -> None:
+    """Drop the per-process definition caches. Used by tests."""
+    _definition_cache.clear()
+    _local_contract_cache.clear()
+    _local_definition_cache.clear()
+
+
+def inline_definitions_into_data_contract(
+    data_contract: OpenDataContractStandard,
+    config: "Config | None" = None,
+    base_location: str | None = None,
+    visited: frozenset[str] = frozenset(),
+    configured_host_only: bool = False,
+):
+    """Resolve `authoritativeDefinitions[type in {semantics, definition,
+    businessDefinition}]` on every property.
+
+    `base_location` is the location the contract itself was read from; local
+    file references resolve relative to it. `visited` carries the chain of files
+    already being resolved, so a reference cycle is reported instead of
+    recursing forever.
+
+    In-memory only. Inline values always win. Resolution failures raise
+    `DataContractException` -- a broken reference rejects the contract.
+    """
     if data_contract.schema_ is None:
         return
 
     for schema_obj in data_contract.schema_:
         if schema_obj.properties:
             for prop in schema_obj.properties:
-                inline_definition_into_property(prop, data_contract)
+                inline_definition_into_property(prop, config, base_location, visited, configured_host_only)
 
 
-def inline_definition_into_property(prop: SchemaProperty, data_contract: OpenDataContractStandard):
-    """Recursively inline definitions into a property and its nested properties."""
-    # Iterate over items for arrays
+def inline_definition_into_property(
+    prop: SchemaProperty,
+    config: "Config | None" = None,
+    base_location: str | None = None,
+    visited: frozenset[str] = frozenset(),
+    configured_host_only: bool = False,
+):
+    """Resolve and inline; recurse into nested properties and array items."""
     if prop.items is not None:
-        inline_definition_into_property(prop.items, data_contract)
-
-    # Iterate over nested properties
+        inline_definition_into_property(prop.items, config, base_location, visited, configured_host_only)
     if prop.properties is not None:
         for nested_prop in prop.properties:
-            inline_definition_into_property(nested_prop, data_contract)
+            inline_definition_into_property(nested_prop, config, base_location, visited, configured_host_only)
 
-    # No definition $ref support in ODCS at the moment
-    # ODCS uses a different approach - definitions would be handled differently
+    resolved = _resolvable_reference(prop)
+    if resolved is None:
+        return
+
+    type_, url = resolved
+    if _is_local_reference(url):
+        definition = _resolve_local_definition(url, base_location, visited, config)
+    else:
+        definition = _resolve_definition(url, type_, config, configured_host_only)
+    _apply_definition_to_property(prop, definition)
+
+
+def _is_local_reference(url: str) -> bool:
+    """True for references into a file on disk, in either of its two shapes:
+    `<contract>#<fragment>`, and a bare `<file>` that is itself the definition.
+
+    The route is chosen by the URL's shape, not by the link's type: any
+    resolvable type may point at either a file or a URL, so the same syntax
+    works everywhere.
+
+    A bare file is recognized by its suffix, because a fragment-less url with
+    no scheme is otherwise a path on the configured host (`url: /definitions/…`),
+    which must keep resolving over HTTP.
+    """
+    if url.startswith("http://") or url.startswith("https://"):
+        return False
+    if "#" in url:
+        return True
+    return Path(url).suffix.lower() in _DEFINITION_FILE_SUFFIXES
+
+
+def _resolvable_reference(prop: SchemaProperty) -> tuple[str, str] | None:
+    """`(type, url)` of the highest-precedence resolvable authoritativeDefinition
+    on `prop`, or None. Precedence: semantics > semantic > definition >
+    businessDefinition."""
+    for wanted_type in _RESOLVABLE_AUTHORITATIVE_TYPES:
+        for ad in prop.authoritativeDefinitions or []:
+            if ad.type == wanted_type and ad.url:
+                return wanted_type, ad.url
+    return None
+
+
+def _resolve_local_definition(
+    url: str, base_location: str | None, visited: frozenset[str], config: "Config | None" = None
+) -> SchemaProperty:
+    """Resolve a reference to a file on disk, in either of its two shapes:
+
+      - `<contract>#schema/<schema>/properties/<property>` addresses one property
+        inside a contract file.
+      - `<file>` without a fragment: the file *is* the definition and holds the
+        property's own elements (`businessName`, `description`, `examples`, …)
+        at the top level.
+
+    The file path is relative to the contract that holds the reference, so a set
+    of files stays resolvable wherever the directory is checked out. Cached per
+    resolved path, and per `path#fragment` where there is a fragment.
+    """
+    path_part, hash_, fragment = url.partition("#")
+    if not path_part:
+        raise _local_resolution_error(url, "the reference must name a contract file before the '#'")
+    if hash_ and not fragment:
+        raise _local_resolution_error(url, "the reference must name a fragment after the '#'")
+
+    target_path = _resolve_local_path(url, path_part, base_location)
+    cache_key = f"{target_path}#{fragment}" if fragment else str(target_path)
+    cached = _local_definition_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    if fragment:
+        contract = _load_local_contract(url, target_path, visited, config)
+        definition = _lookup_fragment(url, contract, fragment)
+    else:
+        definition = _load_local_property(url, target_path, visited, config)
+
+    _local_definition_cache.put(cache_key, definition)
+    return definition
+
+
+def _resolve_local_path(url: str, path_part: str, base_location: str | None) -> Path:
+    """Absolute path of the referenced file, relative to the referencing file."""
+    if base_location is None:
+        raise _local_resolution_error(
+            url,
+            "the contract was not read from a file, so there is no directory to resolve the reference against; "
+            "pass the contract by file location, or use an absolute URL",
+        )
+    if base_location.startswith("http://") or base_location.startswith("https://"):
+        raise _local_resolution_error(
+            url,
+            f"the contract was read from '{base_location}', and file references are only resolved for contracts "
+            "read from the local file system",
+        )
+    return (Path(base_location).parent / path_part).resolve()
+
+
+def _load_local_contract(
+    url: str, contract_path: Path, visited: frozenset[str], config: "Config | None" = None
+) -> OpenDataContractStandard:
+    """Parse the referenced contract and resolve its own references first, so a
+    chain (technical field -> business attribute -> semantic concept) resolves.
+    """
+    key = str(contract_path)
+    cached = _local_contract_cache.get(key)
+    if cached is not None:
+        return cached
+    if key in visited:
+        raise _local_resolution_error(url, f"'{key}' is already being resolved, so the references form a cycle")
+    if not contract_path.is_file():
+        raise _local_resolution_error(url, f"the file '{key}' does not exist")
+
+    try:
+        contract = _resolve_data_contract_from_str(read_resource(key, config))[0]
+    except DataContractException as e:
+        raise _local_resolution_error(url, f"'{key}' is not a valid data contract: {e.reason}", original_exception=e)
+
+    inline_definitions_into_data_contract(contract, config, base_location=key, visited=visited | {key})
+    _local_contract_cache.put(key, contract)
+    return contract
+
+
+def _load_local_property(
+    url: str, property_path: Path, visited: frozenset[str], config: "Config | None" = None
+) -> SchemaProperty:
+    """Parse a file that is a definition on its own: no fragment, so the document
+    holds the property's elements directly instead of a whole contract.
+
+    Its own `authoritativeDefinitions` are resolved first, so a chain of files
+    resolves the same way a chain of contracts does.
+    """
+    key = str(property_path)
+    if key in visited:
+        raise _local_resolution_error(url, f"'{key}' is already being resolved, so the references form a cycle")
+    if not property_path.is_file():
+        raise _local_resolution_error(url, f"the file '{key}' does not exist")
+
+    try:
+        document = _to_yaml(read_resource(key, config))
+    except DataContractException as e:
+        raise _local_resolution_error(url, f"'{key}' is not valid YAML: {e.reason}", original_exception=e)
+
+    if isinstance(document, dict) and is_open_data_contract_standard(document):
+        raise _local_resolution_error(
+            url,
+            f"'{key}' is a data contract, not a single property; add a fragment such as "
+            "'#schema/<schema>/properties/<property>' to say which property is meant",
+        )
+
+    try:
+        definition = SchemaProperty.model_validate(document)
+    except Exception as e:
+        raise _local_resolution_error(url, f"'{key}' is not a valid ODCS property: {e}", original_exception=e)
+
+    inline_definition_into_property(definition, config, base_location=key, visited=visited | {key})
+    return definition
+
+
+def _lookup_fragment(url: str, contract: OpenDataContractStandard, fragment: str) -> SchemaProperty:
+    """Walk `schema/<schema>/properties/<property>[/properties/<nested>|/items]…`.
+
+    Each step matches on `id` first and falls back to `name`: contracts that
+    carry stable ids use them as the referencing anchor, while `name` keeps the
+    syntax usable for contracts that don't.
+    """
+    segments = [segment for segment in fragment.split("/") if segment]
+    if len(segments) < 2 or segments[0] != "schema":
+        raise _local_resolution_error(
+            url, f"the fragment '{fragment}' must start with 'schema/<schema>' and end at a property"
+        )
+
+    schema_objects = contract.schema_ or []
+    current = _match_by_id_or_name(schema_objects, segments[1])
+    if current is None:
+        raise _local_resolution_error(
+            url, f"no schema object '{segments[1]}' in the contract{_available(schema_objects)}"
+        )
+
+    index = 2
+    while index < len(segments):
+        step = segments[index]
+        if step == "items":
+            if current.items is None:
+                raise _local_resolution_error(url, f"'{segments[index - 1]}' has no 'items'")
+            current = current.items
+            index += 1
+            continue
+        if step != "properties" or index + 1 >= len(segments):
+            raise _local_resolution_error(
+                url, f"the fragment '{fragment}' must continue with 'properties/<property>' or 'items'"
+            )
+        wanted = segments[index + 1]
+        candidates = current.properties or []
+        match = _match_by_id_or_name(candidates, wanted)
+        if match is None:
+            raise _local_resolution_error(
+                url, f"no property '{wanted}' in '{segments[index - 1]}'{_available(candidates)}"
+            )
+        current = match
+        index += 2
+
+    if not isinstance(current, SchemaProperty):
+        raise _local_resolution_error(
+            url, f"the fragment '{fragment}' points at a schema object; it must point at a property"
+        )
+    return current
+
+
+def _match_by_id_or_name(candidates, wanted: str):
+    for candidate in candidates:
+        if getattr(candidate, "id", None) == wanted:
+            return candidate
+    for candidate in candidates:
+        if candidate.name == wanted:
+            return candidate
+    return None
+
+
+def _available(candidates) -> str:
+    names = [getattr(c, "id", None) or c.name for c in candidates]
+    return f" (available: {', '.join(names)})" if names else ""
+
+
+def _local_resolution_error(
+    url: str, detail: str, original_exception: Exception | None = None
+) -> DefinitionResolutionError:
+    reason = f"Could not resolve business definition '{url}': {detail}"
+    logger.warning(reason)
+    return DefinitionResolutionError(url=url, reason=reason, original_exception=original_exception)
+
+
+def _resolve_definition(
+    url: str, type_: str, config: "Config | None" = None, configured_host_only: bool = False
+) -> SchemaProperty:
+    """Fetch and parse the definition or semantic concept at `url`.
+
+    `type_` controls how an absolute URL on a different host is handled:
+    a `semantics`/`semantic` URL whose host differs from the configured
+    entropy-data host is treated as an IRI and routed through
+    `/api/semantics?iri=...`; every other type is fetched directly
+    (anonymously, so the API key never leaks). The `x-api-key` is only
+    ever sent to the configured host.
+
+    Cached per target URL and API key after a successful fetch; failures aren't cached.
+    """
+    target_url, headers, host_hint = _build_request(url, type_, config, configured_host_only)
+    cache_key = f"{target_url} {headers.get('x-api-key')}"
+    cached = _definition_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    try:
+        # Not following redirects keeps the API key from travelling to another host.
+        response = requests.get(target_url, headers=headers, timeout=10, allow_redirects=False)
+    except requests.RequestException as e:
+        raise _definition_resolution_error(url, target_url, str(e), original_exception=e, hint=host_hint)
+
+    if response.is_redirect:
+        raise _definition_resolution_error(
+            url,
+            target_url,
+            f"HTTP {response.status_code} redirect to '{response.headers.get('Location')}' is not followed",
+        )
+    if response.status_code != 200:
+        # 401/403 here almost always means the configured host is the wrong
+        # deployment for this IRI, so surface the ENTROPY_DATA_HOST hint.
+        hint = host_hint if response.status_code in (401, 403) else None
+        raise _definition_resolution_error(url, target_url, f"HTTP {response.status_code} {response.reason}", hint=hint)
+
+    try:
+        definition = SchemaProperty.model_validate_json(response.content)
+    except Exception as e:
+        raise _definition_resolution_error(
+            url, target_url, f"response body is not a valid ODCS property: {e}", original_exception=e
+        )
+
+    _definition_cache.put(cache_key, definition)
+    return definition
+
+
+def _build_request(
+    url: str, type_: str, config: "Config | None" = None, configured_host_only: bool = False
+) -> tuple[str, dict[str, str], str | None]:
+    """Return the URL to fetch, the headers to use, and an optional host hint.
+
+    The third element is a copy-pasteable ENTROPY_DATA_HOST suggestion that
+    callers append to any auth/transport error from the lookup. It is only set
+    for the off-host semantics IRI case below, where a host mismatch is the most
+    common reason the lookup fails (401/403); it is None otherwise.
+
+    Three cases:
+      - URL on the configured host (relative path or matching absolute URL):
+        fetched directly, x-api-key sent when configured.
+      - Off-host `definition`/`businessDefinition` URL: fetched directly and
+        anonymously -- a contract may legitimately reference a third-party REST
+        URL, and the API key must never leak across hosts.
+      - Off-host `semantics`/`semantic` URL: treated as an IRI and routed
+        through `/api/semantics?iri=...` on the configured host. Requires an
+        API key (that endpoint is API-key only). Only these two types name
+        concepts by IRI; everything else is an address.
+    """
+    from datacontract.integration.entropy_data import _get_host, is_platform_url
+
+    # An untrusted caller may set the host per request (API header); definitions are
+    # then still resolved against the platform as the environment sees it, or the guard would be the caller's.
+    platform_config = None if configured_host_only else config
+    configured_host = _get_host(platform_config)
+    # urljoin keeps absolute URLs as-is and joins leading-slash paths onto
+    # the host -- covers both shapes ODCS allows for `url`.
+    direct_url = urljoin(configured_host, url)
+    headers = {"Accept": "application/vnd.entropydata.odcs+json"}
+
+    if configured_host_only:
+        on_entropy_data_host = is_platform_url(direct_url, None)
+    else:
+        on_entropy_data_host = _hosts_match(direct_url, configured_host)
+    if on_entropy_data_host:
+        api_key = _api_key_for(direct_url, config, configured_host_only)
+        if api_key is not None:
+            headers["x-api-key"] = api_key
+        return direct_url, headers, None
+
+    if type_ not in ("semantics", "semantic"):
+        if configured_host_only:
+            raise _definition_resolution_error(
+                url,
+                direct_url,
+                f"only the Entropy Data platform or the configured host '{configured_host}' may be contacted",
+            )
+        # Third-party REST URL: fetch anonymously, no IRI fallback.
+        return direct_url, headers, None
+
+    # Off-host semantics reference: IRI lookup against the configured host.
+    host_hint = _host_mismatch_hint(url, configured_host)
+    api_key = _api_key_for(configured_host, config, configured_host_only)
+    if api_key is None:
+        from datacontract.integration.entropy_data import _get_api_key_or_none
+
+        missing_key = "set ENTROPY_DATA_API_KEY"
+        if configured_host_only and _get_api_key_or_none(config) is not None:
+            missing_key = (
+                f"the request's API key belongs to its entropy-data-host '{_get_host(config)}', "
+                f"so set ENTROPY_DATA_HOST to that host on the server running the API"
+            )
+        raise _definition_resolution_error(
+            url,
+            f"{configured_host.rstrip('/')}/api/semantics",
+            f"the reference looks like an IRI, so it is resolved through /api/semantics, "
+            f"which requires an API key: {missing_key}",
+            hint=host_hint,
+        )
+    headers["x-api-key"] = api_key
+    lookup_url = f"{configured_host.rstrip('/')}/api/semantics?iri={quote(url, safe='')}"
+    return lookup_url, headers, host_hint
+
+
+def _api_key_for(target_url: str, config: "Config | None", configured_host_only: bool) -> str | None:
+    """The API key that may travel to `target_url`.
+
+    With configured_host_only, a key goes only to the host it belongs to: the server's own key to exactly the
+    environment's host, a key the request brought to the request's host, with the platform's domains as one host.
+    """
+    from datacontract.integration.entropy_data import (
+        _get_api_key_or_none,
+        _get_host,
+        _host_and_port,
+        is_entropy_data_domain,
+    )
+
+    if not configured_host_only:
+        return _get_api_key_or_none(config)
+
+    server_key = _get_api_key_or_none(None)
+    request_key = _get_api_key_or_none(config)
+    request_host = _get_host(config)
+    if (
+        request_key is not None
+        and request_key != server_key
+        and (
+            _host_and_port(target_url) == _host_and_port(request_host)
+            or (is_entropy_data_domain(target_url) and is_entropy_data_domain(request_host))
+        )
+    ):
+        return request_key
+    if server_key is not None and _host_and_port(target_url) == _host_and_port(_get_host(None)):
+        return server_key
+    return None
+
+
+def _apply_definition_to_property(prop: SchemaProperty, definition: SchemaProperty):
+    """Inline the definition's set fields where the property left them unset.
+
+    "Set" follows pydantic's `model_fields_set`, so `description: ""`
+    counts as set and is preserved.
+    """
+    author_set = set(prop.model_fields_set)
+    for field in definition.model_fields_set:
+        if field in _NON_MERGEABLE_FIELDS or field in author_set:
+            continue
+        setattr(prop, field, getattr(definition, field))
+
+
+def _hosts_match(url: str, host: str) -> bool:
+    """True when both URLs have the same netloc (host + port if specified)."""
+    return urlparse(url).netloc == urlparse(host).netloc
+
+
+def _host_mismatch_hint(url: str, configured_host: str) -> str | None:
+    """Actionable hint for the usual cause of a failed IRI lookup: the
+    configured entropy-data host (default https://api.entropy-data.com) is not
+    the deployment that serves this IRI. Names the exact ENTROPY_DATA_HOST value
+    to set -- derived from the IRI's own host -- so the fix is copy-pasteable
+    instead of leaving the user to guess that the host, not the API key, is wrong.
+    None when the IRI names no host, like a URN.
+    """
+    iri = urlparse(url)
+    if not iri.netloc:
+        return None
+    suggested = f"{iri.scheme}://{iri.netloc}" if iri.scheme else iri.netloc
+    return (
+        f"the IRI's host '{iri.netloc}' does not match the configured entropy-data host "
+        f"'{urlparse(configured_host).netloc}'; if your contract is served from "
+        f"'{iri.netloc}', set ENTROPY_DATA_HOST={suggested} so the /api/semantics lookup "
+        f"and your API key target that deployment"
+    )
+
+
+def _definition_resolution_error(
+    url: str, target_url: str, detail: str, original_exception: Exception | None = None, hint: str | None = None
+) -> DefinitionResolutionError:
+    reason = f"Could not resolve business definition '{url}' from {target_url}: {detail}"
+    if hint:
+        reason = f"{reason} — {hint}"
+    logger.warning(reason)
+    return DefinitionResolutionError(url=url, reason=reason, original_exception=original_exception)
 
 
 def _resolve_data_contract_from_str(
-    data_contract_str, schema_location: str = None, inline_definitions: bool = False, all_errors: bool = False
-) -> OpenDataContractStandard:
-    yaml_dict = _to_yaml(data_contract_str)
+    data_contract_str,
+    schema_location: str = None,
+    inline_references: bool = False,
+    all_errors: bool = False,
+    config: "Config | None" = None,
+    base_location: str | None = None,
+    use_declared_api_version: bool = False,
+    configured_host_only: bool = False,
+) -> tuple[OpenDataContractStandard, str | None, list[DataContractException]]:
+    yaml_dict = _to_yaml(data_contract_str, base_location)
+
+    if not isinstance(yaml_dict, dict):
+        raise DataContractException(
+            type="schema",
+            result=ResultEnum.failed,
+            name="Parse data contract",
+            reason="The data contract is empty or not a YAML mapping.",
+            engine="datacontract-cli",
+        )
 
     if is_open_data_product_standard(yaml_dict):
-        logging.info("Cannot import ODPS, as not supported")
+        logger.info("Cannot import ODPS, as not supported")
         raise DataContractException(
             type="schema",
             result=ResultEnum.failed,
             name="Parse ODCS contract",
             reason="Cannot parse ODPS product",
-            engine="datacontract",
+            engine="datacontract-cli",
         )
 
     if is_open_data_contract_standard(yaml_dict):
-        logging.info("Importing ODCS v3")
-        # Validate the ODCS schema
+        logger.info("Importing ODCS v3")
+        # When a custom JSON schema is provided, treat it as the source of
+        # truth and accept extra top-level fields the standard ODCS Pydantic
+        # class would reject.
+        custom_schema = schema_location is not None
+        schema_version = None
         if schema_location is None:
-            schema_location = resources.files("datacontract").joinpath("schemas", "odcs-3.1.0.schema.json")
-        _validate_json_schema(yaml_dict, schema_location, all_errors=all_errors)
+            if use_declared_api_version:
+                schema_version = ODCS_SCHEMA_VERSIONS.get(yaml_dict.get("apiVersion"), DEFAULT_ODCS_SCHEMA_VERSION)
+            schema_location = resources.files("datacontract").joinpath(
+                "schemas", f"odcs-{schema_version or DEFAULT_ODCS_SCHEMA_VERSION}.schema.json"
+            )
+        errors = []
+        warnings = []
+        try:
+            warnings = _validate_json_schema(
+                yaml_dict,
+                schema_location,
+                schema_version=schema_version,
+                custom_schema=custom_schema,
+            )
+        except DataContractValidationErrors as e:
+            errors.extend(e.errors)
+        if not custom_schema:
+            errors.extend(enum_value_errors(yaml_dict))
+        if errors:
+            if all_errors:
+                raise DataContractValidationErrors(errors)
+            raise errors[0]
 
-        # Parse ODCS directly
-        odcs = _parse_odcs_from_dict(yaml_dict)
-        if inline_definitions:
-            inline_definitions_into_data_contract(odcs)
-        return odcs
+        odcs = _parse_odcs_from_dict(yaml_dict, lax=custom_schema)
+        if inline_references:
+            inline_definitions_into_data_contract(
+                odcs,
+                config,
+                base_location=base_location,
+                visited=_initial_visited(base_location),
+                configured_host_only=configured_host_only,
+            )
+        return odcs, schema_version, warnings
 
-    # For DCS format, we need to convert it to ODCS
-    logging.info("Importing DCS format - converting to ODCS")
+    dcs_deprecation = (
+        "Data Contract Specification (DCS) contracts are auto-converted to the new ODCS format. Support will be removed in "
+        "the next major version (January 2027). Convert the contract to ODCS with `datacontract export odcs`."
+    )
+    logger.warning(dcs_deprecation)
     from datacontract.imports.dcs_importer import convert_dcs_to_odcs, parse_dcs_from_dict
 
     dcs = parse_dcs_from_dict(yaml_dict)
     odcs = convert_dcs_to_odcs(dcs)
-    if inline_definitions:
-        inline_definitions_into_data_contract(odcs)
-    return odcs
+    if inline_references:
+        inline_definitions_into_data_contract(
+            odcs,
+            config,
+            base_location=base_location,
+            visited=_initial_visited(base_location),
+            configured_host_only=configured_host_only,
+        )
+    return (
+        odcs,
+        None,
+        [
+            DataContractException(
+                type="lint",
+                result=ResultEnum.warning,
+                name="Check that data contract is an ODCS contract",
+                reason=dcs_deprecation,
+            )
+        ],
+    )
 
 
-def _parse_odcs_from_dict(yaml_dict: dict) -> OpenDataContractStandard:
+def _initial_visited(base_location: str | None) -> frozenset[str]:
+    """Seed the cycle guard with the contract being resolved, so a file that
+    references itself (directly or through a chain) is reported as a cycle."""
+    if base_location is None or base_location.startswith("http://") or base_location.startswith("https://"):
+        return frozenset()
+    return frozenset({str(Path(base_location).resolve())})
+
+
+def _parse_odcs_from_dict(yaml_dict: dict, lax: bool = False) -> OpenDataContractStandard:
     """Parse ODCS from a dictionary."""
+    cls = _LaxOpenDataContractStandard if lax else OpenDataContractStandard
     try:
-        return OpenDataContractStandard(**yaml_dict)
+        return cls(**yaml_dict)
     except Exception as e:
         raise DataContractException(
             type="schema",
             name="Parse ODCS contract",
             reason=f"Failed to parse ODCS contract: {str(e)}",
-            engine="datacontract",
+            engine="datacontract-cli",
             original_exception=e,
         )
 
 
-def _to_yaml(data_contract_str) -> dict:
+def _to_yaml(data_contract_str, location: str | None = None) -> dict:
     try:
         return yaml.load(data_contract_str, Loader=_SafeLoaderNoTimestamp)
     except Exception as e:
-        logging.warning(f"Cannot parse YAML. Error: {str(e)}")
+        where = f" in '{location}'" if location else ""
         raise DataContractException(
             type="lint",
             result="failed",
             name="Check that data contract YAML is valid",
-            reason=f"Cannot parse YAML. Error: {str(e)}",
-            engine="datacontract",
+            reason=f"Cannot parse YAML{where}. Error: {str(e)}",
+            engine="datacontract-cli",
         )
 
 
-def _validation_error_to_exception(error_message: str, original_exception=None) -> DataContractException:
+def _validation_error_to_exception(
+    error_message: str, original_exception=None, schema_version: str | None = None
+) -> DataContractException:
     return DataContractException(
         type="lint",
         result=ResultEnum.failed,
-        name="Check that data contract YAML is valid",
+        name="Check that data contract YAML is valid"
+        if schema_version is None
+        else f"Check that data contract is valid against ODCS v{schema_version}",
         reason=error_message,
-        engine="datacontract",
+        engine="datacontract-cli",
         original_exception=original_exception,
     )
 
 
-def _validate_json_schema(yaml_str, schema_location: str | Path = None, all_errors: bool = False):
-    logging.debug(f"Linting data contract with schema at {schema_location}")
+def _ignored_fields(value, model: type[BaseModel], path: str) -> list[tuple[str, list[str]]]:
+    """The keys of value, by path, that parsing it as model drops."""
+    if isinstance(value, list):
+        return [ignored for i, item in enumerate(value) for ignored in _ignored_fields(item, model, f"{path}[{i}]")]
+    if not isinstance(value, dict):
+        return []
+    fields = {field.alias or name: field for name, field in model.model_fields.items()}
+    unknown = [key for key in value if key not in fields]
+    ignored = [(path, unknown)] if unknown else []
+    for key, item in value.items():
+        if key not in fields:
+            continue
+        candidates, types = [], [(fields[key].annotation, False)]
+        while types:
+            t, in_list = types.pop()
+            if isinstance(t, type) and issubclass(t, BaseModel):
+                candidates.append((t, in_list))
+            types.extend((arg, in_list or typing.get_origin(t) is list) for arg in typing.get_args(t))
+        # team is either a Team or a list of TeamMember.
+        submodel = next((m for m, in_list in candidates if in_list == isinstance(item, list)), None)
+        if submodel is not None:
+            ignored.extend(_ignored_fields(item, submodel, f"{path}.{key}"))
+    return ignored
+
+
+def _validate_json_schema(
+    yaml_str,
+    schema_location: str | Path = None,
+    schema_version: str | None = None,
+    custom_schema: bool = False,
+) -> list[DataContractException]:
+    """Raise the schema violations, and return as warnings the fields the ODCS model drops."""
+    logger.debug(f"Linting data contract with schema at {schema_location}")
     schema = fetch_schema(schema_location)
-    if all_errors:
-        validator_cls = validators.validator_for(schema)
-        validator_cls.check_schema(schema)
-        validator = validator_cls(schema=schema)
-        errors = sorted(validator.iter_errors(yaml_str), key=lambda error: list(error.path))
-        if errors:
-            logging.warning(f"Data Contract YAML is invalid. Validation errors: {len(errors)}")
-            raise DataContractValidationErrors(
-                [_validation_error_to_exception(error.message, original_exception=error) for error in errors]
+    if not custom_schema:
+        # unevaluatedProperties slows jsonschema down exponentially with nesting; _ignored_fields covers it.
+        schema = json.loads(
+            json.dumps(schema), object_hook=lambda o: {k: v for k, v in o.items() if k != "unevaluatedProperties"}
+        )
+    validator_cls = validators.validator_for(schema)
+    validator_cls.check_schema(schema)
+    validator = validator_cls(schema=schema)
+    # jsonschema can report the same error once per schema branch; keep one.
+    errors = {(error.json_path, error.message): error for error in validator.iter_errors(yaml_str)}.values()
+    errors = sorted(errors, key=lambda error: list(error.path))
+    # A ${VAR} in an enum field is checked once it resolves; so is the object whose schema branch it selects.
+    deferred = [error for error in errors if error.validator == "enum" and contains_variables(error.instance)]
+    deferred_objects = {tuple(error.path)[:-1] for error in deferred}
+    errors = [
+        error
+        for error in errors
+        if error not in deferred
+        and not (error.validator == "unevaluatedProperties" and tuple(error.path) in deferred_objects)
+    ]
+    if errors:
+        logger.warning(f"Data Contract YAML is invalid. Validation errors: {len(errors)}")
+        exceptions = []
+        for error in errors:
+            message = error.message
+            if error.validator in ("oneOf", "anyOf"):
+                # A branch whose type the value lacks explains nothing.
+                same_type = [c for c in error.context if not (c.validator == "type" and not c.relative_path)]
+                if same_type:
+                    error = best_match(same_type)
+                    message = error.message
+                elif error.context:
+                    message = "must be of type " + " or ".join(repr(c.validator_value) for c in error.context)
+                else:
+                    message = f"must match exactly one of {len(error.validator_value)} definitions, but matches several"
+            exceptions.append(
+                _validation_error_to_exception(
+                    _resolve_jsonschema_compliance_error_message_path(
+                        yaml_str, f"data{error.json_path[1:]}: {message}"
+                    ),
+                    original_exception=error,
+                    schema_version=schema_version,
+                )
             )
-        logging.debug("YAML data is valid.")
-        return
-    try:
-        fastjsonschema.validate(schema, yaml_str, use_default=False)
-        logging.debug("YAML data is valid.")
-    except JsonSchemaValueException as e:
-        logging.warning(f"Data Contract YAML is invalid. Validation error: {e.message}")
-        raise _validation_error_to_exception(e.message, original_exception=e)
-    except Exception as e:
-        logging.warning(f"Data Contract YAML is invalid. Validation error: {str(e)}")
-        raise _validation_error_to_exception(str(e), original_exception=e)
+        raise DataContractValidationErrors(exceptions)
+    logger.debug("YAML data is valid.")
+    if custom_schema:
+        return []
+    return [
+        DataContractException(
+            type="lint",
+            result=ResultEnum.warning,
+            name="Check that data contract has no unknown fields",
+            reason=_resolve_jsonschema_compliance_error_message_path(
+                yaml_str,
+                f"{path}: unknown fields are ignored: {', '.join(repr(field) for field in fields)}. "
+                "This will become an error in the next major version (January 2027).",
+            ),
+        )
+        for path, fields in _ignored_fields(yaml_str, OpenDataContractStandard, "data")
+    ]

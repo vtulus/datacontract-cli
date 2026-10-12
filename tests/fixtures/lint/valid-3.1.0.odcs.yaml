@@ -59,16 +59,16 @@ schema:
     tags:
     - "businesskey"
     authoritativeDefinitions:
-    - type: "definition"
-      url: "https://datamesh-manager-demo.azurecontainerapps.io/demo440238121320/definitions/fulfillment/shipment_id"
+    - type: "businessDefinition"
+      url: "definitions/shipment_id.odcs.yaml"
   - name: "order_id"
     physicalName: "oid"
     physicalType: "text"
     primaryKey: false
     partitioned: false
     authoritativeDefinitions:
-    - type: "definition"
-      url: "https://datamesh-manager-demo.azurecontainerapps.io/demo440238121320/definitions/sales/order_id"
+    - type: "businessDefinition"
+      url: "definitions/order_id.odcs.yaml"
   - name: "delivery_date"
     businessName: "Delivery Date"
     logicalType: "date"

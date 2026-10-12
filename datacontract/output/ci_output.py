@@ -57,10 +57,12 @@ def _write_azure_annotations(run: Run, data_contract_file: str, out=sys.stdout):
 
 
 RESULT_EMOJI = {
-    "passed": "🟢 passed",
-    "warning": "🟠 warning",
-    "failed": "🔴 failed",
-    "error": "🔴 error",
+    "passed": "🟢 Passed",
+    "warning": "🟠 Warning",
+    "failed": "🔴 Failed",
+    "error": "🔴 Error",
+    "skipped": "⚪ Skipped",
+    "unknown": "⚪ Unknown",
 }
 
 
@@ -74,11 +76,13 @@ def _write_github_step_summary(results: List[Tuple[str, Run]], summary_path: str
         has_failures = any(r in ("failed", "error") for r in result_values)
         has_warnings = any(r == "warning" for r in result_values)
         if has_failures:
-            overall = "🔴 failed"
+            overall = "🔴 Failed"
         elif has_warnings:
-            overall = "🟠 warning"
+            overall = "🟠 Warning"
+        elif any(r == "passed" for r in result_values):
+            overall = "🟢 Passed"
         else:
-            overall = "🟢 passed"
+            overall = "⚪ No checks were executed"
         lines.append("## Data Contract CI")
         lines.append("")
         n_passed = sum(1 for r in result_values if r == "passed")
@@ -102,6 +106,7 @@ def _write_github_step_summary(results: List[Tuple[str, Run]], summary_path: str
         n_failed = sum(1 for c in run.checks if c.result == "failed") if run.checks else 0
         n_warnings = sum(1 for c in run.checks if c.result == "warning") if run.checks else 0
         n_errors = sum(1 for c in run.checks if c.result == "error") if run.checks else 0
+        n_skipped = sum(1 for c in run.checks if c.result == "skipped") if run.checks else 0
 
         duration = (
             (run.timestampEnd - run.timestampStart).total_seconds() if run.timestampStart and run.timestampEnd else 0
@@ -111,7 +116,7 @@ def _write_github_step_summary(results: List[Tuple[str, Run]], summary_path: str
         lines.append(f"{heading_level} Data Contract CI: {data_contract_file}")
         lines.append("")
         lines.append(
-            f"**Result: {result_display}** | {n_total} checks | {n_passed} passed | {n_failed} failed | {n_warnings} warnings | {n_errors} errors | {duration:.1f}s"
+            f"**Result: {result_display}** | {n_total} checks | {n_passed} passed | {n_failed} failed | {n_warnings} warnings | {n_errors} errors | {n_skipped} skipped | {duration:.1f}s"
         )
         lines.append("")
 
